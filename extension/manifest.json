@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Collect recipes from AllRecipes and build a FairPrice shopping list.",
   "permissions": ["activeTab", "storage", "tabs"],
-  "host_permissions": ["https://allowing-pork-immediate-homepage.trycloudflare.com/*"],
+  "host_permissions": ["https://floatskivers.onrender.com/*"],
   "action": {
     "default_popup": "popup.html"
   }
