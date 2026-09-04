@@ -1,4 +1,4 @@
-const BACKEND_URL = "https://allowing-pork-immediate-homepage.trycloudflare.com/shopping-list";
+const BACKEND_URL = "https://floatskivers.onrender.com/shopping-list";
 
 const recipeListEl = document.getElementById("recipeList");
 const statusEl = document.getElementById("status");
@@ -24,17 +24,17 @@ async function saveRecipes(recipes) {
 async function renderRecipeList() {
   const recipes = await getRecipes();
   clearChildren(recipeListEl);
-  for (const url of recipes) {
+  for (const recipe of recipes) {
     const li = document.createElement("li");
 
     const span = document.createElement("span");
-    span.textContent = url;
-    span.title = url;
+    span.textContent = recipe.url;
+    span.title = recipe.url;
 
     const removeBtn = document.createElement("button");
     removeBtn.textContent = "x";
     removeBtn.addEventListener("click", async () => {
-      const updated = (await getRecipes()).filter((u) => u !== url);
+      const updated = (await getRecipes()).filter((r) => r.url !== recipe.url);
       await saveRecipes(updated);
       renderRecipeList();
     });
@@ -51,12 +51,34 @@ document.getElementById("addPage").addEventListener("click", async () => {
     setStatus("Could not read the current tab's URL.");
     return;
   }
+  if (!tab.url.includes("allrecipes.com")) {
+    setStatus("This only works on allrecipes.com pages right now.");
+    return;
+  }
+
   const recipes = await getRecipes();
-  if (recipes.includes(tab.url)) {
+  if (recipes.some((r) => r.url === tab.url)) {
     setStatus("Already added.");
     return;
   }
-  recipes.push(tab.url);
+
+  // Read the page's own HTML directly from the tab instead of having the
+  // backend re-fetch it: AllRecipes' bot protection blocks scripted
+  // server-side requests, but the page the user is already looking at
+  // loaded here just fine.
+  let html;
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => document.documentElement.outerHTML,
+    });
+    html = result;
+  } catch (err) {
+    setStatus("Could not read this page's content.");
+    return;
+  }
+
+  recipes.push({ url: tab.url, html });
   await saveRecipes(recipes);
   setStatus("");
   renderRecipeList();
@@ -108,7 +130,7 @@ document.getElementById("buildList").addEventListener("click", async () => {
     const response = await fetch(BACKEND_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls: recipes }),
+      body: JSON.stringify({ recipes }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));

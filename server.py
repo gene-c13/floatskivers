@@ -30,16 +30,21 @@ def health():
 @app.route("/shopping-list", methods=["POST"])
 def shopping_list():
     data = request.get_json(force=True, silent=True) or {}
-    urls = data.get("urls", [])
-    if not urls:
-        return jsonify({"error": "no urls provided"}), 400
+    requested = data.get("recipes", [])
+    if not requested:
+        return jsonify({"error": "no recipes provided"}), 400
 
     recipes = []
     parsed = []
     errors = []
-    for url in urls:
+    for entry in requested:
+        url = entry.get("url", "")
+        html = entry.get("html")
         try:
-            recipe = parse_recipe(url)
+            # The extension sends the page's own HTML (read from the tab
+            # the user is already on) instead of just a URL: AllRecipes'
+            # bot protection blocks the backend fetching pages itself.
+            recipe = parse_recipe(html if html else url)
             recipes.append(recipe)
             parsed.append({"title": recipe["title"], "url": url})
         except Exception as exc:  # noqa: BLE001
