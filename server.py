@@ -11,6 +11,8 @@ and the extension talks to http://localhost:5050.
 Not port 5000: macOS's AirPlay Receiver (ControlCenter) squats on it and
 returns 403 to anything it doesn't recognize as an AirPlay request.
 """
+import os
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
@@ -54,6 +56,10 @@ def shopping_list():
 
 
 if __name__ == "__main__":
-    # debug=False: this gets tunneled to a public URL for the demo, and
-    # Flask's debugger is a known remote-code-execution risk once exposed.
-    app.run(port=5050, debug=False)
+    # 0.0.0.0 so this is reachable from outside a container; PORT lets a
+    # hosting platform (e.g. App Runner) assign its own port, defaulting
+    # to 5050 for local dev (not 5000: macOS AirPlay Receiver owns that).
+    # debug=False: this gets exposed publicly, and Flask's debugger is a
+    # known remote-code-execution risk once that's the case.
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port, debug=False)
