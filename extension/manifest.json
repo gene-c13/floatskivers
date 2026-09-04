@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Recipe to FairPrice Cart",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Collect recipes from AllRecipes and build a FairPrice shopping list.",
   "permissions": ["activeTab", "storage", "tabs", "scripting"],
   "host_permissions": [
     "https://floatskivers.onrender.com/*",
-    "https://*.allrecipes.com/*"
+    "https://*.allrecipes.com/*",
+    "https://www.fairprice.com.sg/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html"
   }

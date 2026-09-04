@@ -12,8 +12,15 @@
     li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     li button { width: auto; margin: 0; padding: 2px 6px; }
     #status { color: #555; margin-bottom: 8px; }
-    #result { max-height: 260px; overflow-y: auto; }
-    .item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #f2f2f2; }
+    #result { max-height: 310px; overflow-y: auto; }
+    .item { padding: 7px 0; border-bottom: 1px solid #f2f2f2; }
+    .item-head { display: flex; justify-content: space-between; gap: 8px; }
+    .item-name { font-weight: 600; }
+    .item-quantity { color: #555; white-space: nowrap; }
+    .chosen-product { display: block; margin-top: 4px; line-height: 1.25; }
+    .chosen-meta { color: #555; display: block; font-size: 11px; margin-top: 2px; }
+    .searching { color: #777; display: block; font-size: 11px; margin-top: 4px; }
+    #addAll { margin: 10px 0 0; }
     .flag { color: #b00; }
   </style>
 </head>
@@ -24,6 +31,7 @@
   <button id="buildList">Build shopping list</button>
   <div id="status"></div>
   <div id="result"></div>
+  <button id="addAll" hidden disabled>Add to FairPrice Cart</button>
   <script src="popup.js"></script>
 </body>
 </html>
