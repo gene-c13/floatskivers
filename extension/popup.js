@@ -15,6 +15,9 @@ const progressStageEl = document.getElementById("progressStage");
 const FAIRPRICE_ORIGIN = "https://www.fairprice.com.sg";
 const FAIRPRICE_SEARCH_URL = `${FAIRPRICE_ORIGIN}/search?query=`;
 const productSearchCache = new Map();
+const SEARCH_QUERY_OVERRIDES = new Map([
+  ["baking potatoes", "potato"],
+]);
 let selectedMatches = [];
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -24,12 +27,28 @@ chrome.runtime.onMessage.addListener((message) => {
 
 function updateCartProgress(message) {
   const total = Math.max(1, Number(message.total) || selectedMatches.length || 1);
-  const current = Math.max(1, Number(message.current) || 1);
-  const completed = message.stage === "complete" ? current : current - 1;
-  const percentage = message.stage === "finished" ? 100 : Math.round((completed / total) * 100);
+  const current = Math.max(0, Number(message.current) || 0);
+  const completed = Math.max(0, Number(message.completed) || 0);
+  let percentage;
+  if (message.stage === "finished") percentage = 100;
+  else if (message.stage === "preloading") percentage = 0;
+  else if (message.stage === "preloaded") percentage = Math.round((current / total) * 28);
+  else if (message.stage === "streaming_native") percentage = 30;
+  else if (message.stage === "native") percentage = 30 + Math.round((completed / total) * 48);
+  else if (message.stage === "native_result") percentage = 30 + Math.round((completed / total) * 48);
+  else if (message.stage === "reconciling") percentage = 82;
+  else if (message.stage === "complete") percentage = 82 + Math.round((current / total) * 18);
+  else percentage = 28;
   const stageLabels = {
+    preloading: "Opening all product pages in parallel…",
+    preloaded: `Prepared ${current} of ${total} product pages…`,
     opening: "Opening product page in the background…",
-    native: "Waiting for FairPrice’s native Add to cart button…",
+    native: `Adding ${message.productName || "product"} to the cart…`,
+    streaming_native: "Product pages are loading in parallel…",
+    native_result: message.nativeVerified
+      ? `Added ${completed} of ${total}; taking the next ready product…`
+      : `Checked ${completed} of ${total}; safe fallback is queued…`,
+    reconciling: "Verifying every product and requested quantity…",
     fallback: "Native cart was slow — using the safe fallback…",
     complete: message.method === "native"
       ? "Added with FairPrice’s native cart"
@@ -40,13 +59,19 @@ function updateCartProgress(message) {
   };
 
   cartProgressEl.classList.add("visible");
-  progressCountEl.textContent = message.stage === "finished" ? `${total} / ${total}` : `${current} / ${total}`;
-  progressProductEl.textContent = message.productName || "All products processed";
+  const displayCurrent = ["streaming_native", "native", "native_result"].includes(message.stage)
+    ? completed
+    : current;
+  progressCountEl.textContent = message.stage === "finished" ? `${total} / ${total}` : `${displayCurrent} / ${total}`;
+  progressProductEl.textContent = message.productName
+    || (message.stage === "finished" ? "All products processed" : "Preparing product pages…");
   progressBarEl.style.width = `${percentage}%`;
   progressStageEl.textContent = stageLabels[message.stage] || "Working in the background…";
 
-  const activeRow = Array.from(resultEl.querySelectorAll(".item"))
-    .find((row) => row.dataset.queueIndex === String(current));
+  const isAddingStage = ["native", "native_result", "fallback", "complete"].includes(message.stage);
+  const activeRow = isAddingStage
+    ? Array.from(resultEl.querySelectorAll(".item")).find((row) => row.dataset.queueIndex === String(current))
+    : null;
   if (activeRow) {
     activeRow.dataset.state = message.stage === "complete" ? message.method : "active";
     if (message.stage === "complete") {
@@ -159,17 +184,32 @@ function productPackSize(product) {
 }
 
 function productUrl(product) {
-  return `${FAIRPRICE_ORIGIN}/product/${product.slug}-${product.clientItemId}`;
+  // The slug is already FairPrice's complete product path. Appending the
+  // client item ID produced invalid "...-13287436-13287436" URLs.
+  return `${FAIRPRICE_ORIGIN}/product/${product.slug}`;
+}
+
+function fairPriceSearchQuery(ingredientName) {
+  const normalized = String(ingredientName).trim().toLowerCase();
+  return SEARCH_QUERY_OVERRIDES.get(normalized) || ingredientName;
 }
 
 function searchableWords(text) {
   const ignored = new Set(["and", "of", "the", "a", "an", "fresh"]);
+  const singular = (word) => {
+    if (word === "potatoes") return "potato";
+    if (word === "tomatoes") return "tomato";
+    if (word.endsWith("ies") && word.length > 4) return `${word.slice(0, -3)}y`;
+    if (word.endsWith("s") && !word.endsWith("ss") && word.length > 3) return word.slice(0, -1);
+    return word;
+  };
   return String(text)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .split(/\s+/)
-    .filter((word) => word && !ignored.has(word));
+    .filter((word) => word && !ignored.has(word))
+    .map(singular);
 }
 
 function packAmountInGrams(displayUnit) {
@@ -185,6 +225,12 @@ function packAmountInGrams(displayUnit) {
   return Number(singlePack[1]) * (singlePack[2] === "kg" ? 1000 : 1);
 }
 
+function packAmountInPieces(displayUnit) {
+  const text = String(displayUnit).toLowerCase().replace(/\s+/g, "");
+  const count = text.match(/(\d+(?:\.\d+)?)(?:perpack|pcs?|pieces?|count|ct)\b/);
+  return count ? Number(count[1]) : null;
+}
+
 function recommendedPackCount(item, product) {
   if (item.needs_manual_reconciliation) return 1;
 
@@ -196,7 +242,13 @@ function recommendedPackCount(item, product) {
   }
 
   if (item.unit === "whole" && Number(item.quantity) > 0) {
-    return Math.max(1, Math.ceil(Number(item.quantity)));
+    const pieces = packAmountInPieces(productPackSize(product));
+    return Math.max(1, Math.ceil(Number(item.quantity) / (pieces || 1)));
+  }
+
+  if ((item.unit === "can" || item.unit == null) && Number(item.quantity) > 0) {
+    const pieces = packAmountInPieces(productPackSize(product));
+    return Math.max(1, Math.ceil(Number(item.quantity) / (pieces || 1)));
   }
 
   return 1;
@@ -214,6 +266,13 @@ function scoreProduct(item, product, index) {
   const normalizedName = product.name.toLowerCase();
   if (normalizedName.includes(item.name.toLowerCase())) score += 80;
   if (product.brand?.name?.toLowerCase() === "fairprice") score += 3;
+
+  // Penalize processed derivatives when the recipe asks for the whole food.
+  const derivativeWords = ["starch", "flour", "powder", "flake", "chip", "crisp", "paste", "sauce", "juice"];
+  const queryWords = new Set(query);
+  for (const word of derivativeWords) {
+    if (productWords.has(word) && !queryWords.has(word)) score -= 180;
+  }
 
   if (item.unit === "g" && Number(item.quantity) > 0) {
     const packGrams = packAmountInGrams(productPackSize(product));
@@ -253,7 +312,7 @@ async function searchFairPrice(query) {
       const layouts = payload.props?.pageProps?.data?.data?.page?.layouts ?? [];
       const collection = layouts.find((layout) => layout.name === "ProductCollection");
       return (collection?.value?.collection?.product ?? [])
-        .filter((product) => product?.id && product?.name && product?.slug && product?.clientItemId);
+        .filter((product) => product?.id && product?.name && product?.slug);
     })());
   }
   return productSearchCache.get(query);
@@ -328,7 +387,7 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
 
   const searchLink = document.createElement("a");
   searchLink.className = "chosen-meta";
-  searchLink.href = `${FAIRPRICE_SEARCH_URL}${encodeURIComponent(item.name)}`;
+  searchLink.href = `${FAIRPRICE_SEARCH_URL}${encodeURIComponent(fairPriceSearchQuery(item.name))}`;
   searchLink.target = "_blank";
   searchLink.rel = "noreferrer";
   searchLink.textContent = "See all search results";
@@ -362,7 +421,7 @@ async function renderResult(data) {
 
   const matches = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
     try {
-      const products = await searchFairPrice(item.name);
+      const products = await searchFairPrice(fairPriceSearchQuery(item.name));
       const product = chooseBestProduct(item, products);
       const quantity = product ? recommendedPackCount(item, product) : 0;
       showSelectedProduct(choice, item, product, quantity);

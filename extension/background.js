@@ -1,6 +1,7 @@
 const FAIRPRICE_CART_URL = "https://www.fairprice.com.sg/cart";
+const FAIRPRICE_SYNC_URL = "https://www.fairprice.com.sg/";
 
-function navigateTabAndWait(tabId, url, timeoutMs = 20_000) {
+function navigateTabAndWait(tabId, url, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -32,6 +33,34 @@ function navigateTabAndWait(tabId, url, timeoutMs = 20_000) {
     chrome.tabs.update(tabId, { url })
       .catch(() => finish(() => reject(new Error("FairPrice tab was closed."))));
   });
+}
+
+async function executeScriptWhenReady(injection, timeoutMs = 4_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      return await chrome.scripting.executeScript(injection);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  }
+  throw lastError || new Error("The FairPrice product document was not ready.");
+}
+
+async function waitForNativeAddButton(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const button = document.querySelector('button[data-testid="SvgAddToCart"]')
+      || Array.from(document.querySelectorAll("button")).find((candidate) => {
+        const label = `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`;
+        return /add\s*to\s*cart/i.test(label);
+      });
+    if (button && !button.disabled) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
 }
 
 // Runs in a FairPrice product page. Native page events are used first, and
@@ -128,67 +157,121 @@ async function tryNativeAdd(productId, requestedQuantity, timeoutMs) {
   };
 }
 
-// Fallback for guest carts. This mirrors the cart entry produced by FairPrice,
-// but writes an absolute target quantity so a partially successful native add
-// is never counted twice.
-function setFairPriceCartQuantity(product, targetQuantity) {
+// Reconciles every requested product in one localStorage read/write cycle.
+// Native clicks from separate tabs may race, so this final atomic pass keeps
+// every successful native entry and fills only missing products or quantities.
+function reconcileFairPriceCart(entries) {
   const cart = JSON.parse(localStorage.getItem("cart") || "{}");
-  const productId = String(product?.id ?? "");
-  if (!productId) throw new Error("The selected FairPrice product has no product ID.");
+  const results = [];
 
-  const quantity = Math.max(1, Math.floor(Number(targetQuantity) || 1));
-  const existing = cart[productId];
+  for (const { product, targetQuantity } of entries) {
+    const productId = String(product?.id ?? "");
+    if (!productId) continue;
 
-  if (existing) {
-    existing.q = String(quantity);
-    existing.count = quantity;
-    existing.t = Math.floor(Date.now() / 1000);
-  } else {
-    const storeData = Array.isArray(product.storeSpecificData)
-      ? product.storeSpecificData[0]
-      : product.storeSpecificData;
-    const price = Number(product.final_price ?? storeData?.mrp ?? product.mrp ?? 0);
-    const discount = Number(storeData?.discount ?? 0);
+    const target = Math.max(1, Math.floor(Number(targetQuantity) || 1));
+    const existing = cart[productId];
+    const current = Math.max(0, Number(existing?.q ?? existing?.count ?? 0) || 0);
+    let changed = false;
 
-    cart[productId] = {
-      ...product,
-      id: product.id,
-      q: String(quantity),
-      wantQuantity: "0",
-      reason: product.has_stock === false ? "OutOfStock" : "InStock",
-      t: Math.floor(Date.now() / 1000),
-      p: null,
-      mrp: price,
-      priceOverridden: false,
-      discount,
-      isFree: false,
-      handlingDays: product.handlingDays ?? 0,
-      deliveredBy: "",
-      isMKP: false,
-      product,
-      offersUnApplied: product.offers ?? [],
-      isChecked: true,
-      isUserEditQuantity: false,
-      bulkRoutingThreshold: storeData?.bulkRoutingThreshold ?? null,
-      __server__handlingDays: product.handlingDays ?? 0,
-      __serverIndex__: 0,
-      count: quantity,
-      totalDiscount: 0,
-    };
+    if (current < target) {
+      changed = true;
+      if (existing) {
+        existing.q = String(target);
+        existing.count = target;
+        existing.t = Math.floor(Date.now() / 1000);
+      } else {
+        const storeData = Array.isArray(product.storeSpecificData)
+          ? product.storeSpecificData[0]
+          : product.storeSpecificData;
+        const price = Number(product.final_price ?? storeData?.mrp ?? product.mrp ?? 0);
+        const discount = Number(storeData?.discount ?? 0);
+
+        cart[productId] = {
+          ...product,
+          id: product.id,
+          q: String(target),
+          wantQuantity: "0",
+          reason: product.has_stock === false ? "OutOfStock" : "InStock",
+          t: Math.floor(Date.now() / 1000),
+          p: null,
+          mrp: price,
+          priceOverridden: false,
+          discount,
+          isFree: false,
+          handlingDays: product.handlingDays ?? 0,
+          deliveredBy: "",
+          isMKP: false,
+          product,
+          offersUnApplied: product.offers ?? [],
+          isChecked: true,
+          isUserEditQuantity: false,
+          bulkRoutingThreshold: storeData?.bulkRoutingThreshold ?? null,
+          __server__handlingDays: product.handlingDays ?? 0,
+          __serverIndex__: 0,
+          count: target,
+          totalDiscount: 0,
+        };
+      }
+    }
+
+    results.push({ productId, target, changed });
   }
 
   localStorage.setItem("cart", JSON.stringify(cart));
-  const saved = JSON.parse(localStorage.getItem("cart") || "{}")[productId];
-  return { productId, quantity: Number(saved?.q ?? saved?.count ?? 0) };
+
+  // FairPrice also caches a presentation-ready seller cart. Keep its item
+  // quantities aligned so the cart page cannot rehydrate a stale quantity of
+  // one over the reconciled `cart` record.
+  try {
+    const sellerCarts = JSON.parse(localStorage.getItem("sellerCart") || "null");
+    if (Array.isArray(sellerCarts) && sellerCarts.length > 0) {
+      const seller = sellerCarts.find((entry) => entry?.sellerInfo?.name === "FairPrice") || sellerCarts[0];
+      seller.items = seller.items || {};
+
+      for (const { productId } of results) {
+        const cartEntry = cart[productId];
+        if (!cartEntry) continue;
+        if (seller.items[productId]) {
+          seller.items[productId].q = cartEntry.q;
+          seller.items[productId].count = cartEntry.count;
+          seller.items[productId].t = cartEntry.t;
+        } else {
+          seller.items[productId] = cartEntry;
+        }
+      }
+
+      const sellerItems = Object.values(seller.items);
+      seller.sellerInfo.totalItemsQuantities = sellerItems.reduce(
+        (sum, item) => sum + (Number(item.q ?? item.count ?? 0) || 0),
+        0,
+      );
+      seller.sellerInfo.orderAmount = Number(sellerItems.reduce(
+        (sum, item) => sum + ((Number(item.mrp ?? 0) || 0) * (Number(item.q ?? item.count ?? 0) || 0)),
+        0,
+      ).toFixed(2));
+      localStorage.setItem("sellerCart", JSON.stringify(sellerCarts));
+    }
+  } catch (_error) {
+    // The canonical cart is still valid; FairPrice can rebuild sellerCart.
+  }
+
+  const savedCart = JSON.parse(localStorage.getItem("cart") || "{}");
+  return results.map((result) => ({
+    ...result,
+    quantity: Math.max(0, Number(savedCart[result.productId]?.q ?? savedCart[result.productId]?.count ?? 0) || 0),
+  }));
 }
 
-function readFairPriceCartQuantity(productId) {
+function readFairPriceCartQuantities(productIds) {
   try {
     const cart = JSON.parse(localStorage.getItem("cart") || "{}");
-    const entry = cart[String(productId)];
-    return Math.max(0, Number(entry?.q ?? entry?.count ?? 0) || 0);
+    return Object.fromEntries(productIds.map((productId) => {
+      const entry = cart[String(productId)];
+      const quantity = Math.max(0, Number(entry?.q ?? entry?.count ?? 0) || 0);
+      return [String(productId), quantity];
+    }));
   } catch (_error) {
-    return 0;
+    return Object.fromEntries(productIds.map((productId) => [String(productId), 0]));
   }
 }
 
@@ -197,11 +280,13 @@ async function addAndShowCart(items) {
     throw new Error("No matched FairPrice products were provided.");
   }
 
-  const tab = await chrome.tabs.create({
+  // Product pages load in parallel, but cart mutations are serialized. Each
+  // FairPrice tab reads and writes the whole guest-cart snapshot, so clicking
+  // in several tabs at once can make the last writer erase another product.
+  const tabs = await Promise.all(items.map(() => chrome.tabs.create({
     active: false,
     url: "about:blank",
-  });
-
+  })));
   try {
     const results = [];
     const sendProgress = (details) => chrome.runtime.sendMessage({
@@ -209,87 +294,204 @@ async function addAndShowCart(items) {
       ...details,
     }).catch(() => {});
 
-    for (let index = 0; index < items.length; index += 1) {
-      const { product, quantity } = items[index];
-      const url = `https://www.fairprice.com.sg/product/${product.slug}-${product.clientItemId}`;
-      const progress = {
-        current: index + 1,
-        total: items.length,
-        productId: String(product.id),
-        productName: product.name,
-      };
-      sendProgress({ ...progress, stage: "opening" });
-
+    let preparedCount = 0;
+    let nativeStarted = false;
+    sendProgress({ stage: "preloading", current: 0, total: items.length });
+    const readiness = items.map(async ({ product, quantity }, index) => {
+      const tab = tabs[index];
+      const url = `https://www.fairprice.com.sg/product/${product.slug}`;
       try {
         await navigateTabAndWait(tab.id, url);
-        sendProgress({ ...progress, stage: "native" });
-        const [{ result: before }] = await chrome.scripting.executeScript({
+        const [{ result: nativeButtonReady }] = await executeScriptWhenReady({
           target: { tabId: tab.id },
-          func: readFairPriceCartQuantity,
-          args: [product.id],
+          func: waitForNativeAddButton,
+          args: [4_000],
         });
-
-        let nativeResult;
-        try {
-          [{ result: nativeResult }] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: tryNativeAdd,
-            args: [product.id, quantity, 4_000],
-          });
-        } catch (error) {
-          nativeResult = {
-            verified: false,
-            target: before + Math.max(1, Math.floor(Number(quantity) || 1)),
-            reason: `native cart interaction failed: ${error.message}`,
-          };
-        }
-
-        if (nativeResult.verified) {
-          const result = {
+        return { product, quantity, tab, nativeButtonReady };
+      } catch (error) {
+        return { product, quantity, tab, nativeButtonReady: false, prepareError: error };
+      } finally {
+        preparedCount += 1;
+        if (!nativeStarted) {
+          sendProgress({
+            stage: "preloaded",
+            current: preparedCount,
+            total: items.length,
             productId: String(product.id),
             productName: product.name,
-            quantity: nativeResult.after,
-            method: "native",
-          };
-          results.push(result);
-          sendProgress({ ...progress, stage: "complete", method: result.method });
-          continue;
+          });
         }
+      }
+    });
 
-        sendProgress({ ...progress, stage: "fallback" });
-        const [{ result: fallbackResult }] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: setFairPriceCartQuantity,
-          args: [product, nativeResult.target],
-        });
-        if (fallbackResult.quantity !== nativeResult.target) {
-          throw new Error("The local-storage fallback did not reach the requested quantity.");
-        }
-        const result = {
-          ...fallbackResult,
-          productName: product.name,
-          method: "localStorage",
-          reason: nativeResult.reason,
+    // Attach consumers now so jobs retain their actual readiness order even
+    // when several pages become interactive while the cart snapshot is read.
+    // The gate prevents any click until that snapshot is safely captured.
+    let releaseNativeQueue;
+    const nativeQueueGate = new Promise((resolve) => {
+      releaseNativeQueue = resolve;
+    });
+    const queuedReadiness = readiness.map(async (ready, index) => {
+      const job = await ready;
+      await nativeQueueGate;
+      return enqueueNativeMutation(job, index);
+    });
+
+    // Only the first usable FairPrice page gates the initial cart snapshot.
+    // Every other page continues preparing independently in the background.
+    let storageJob;
+    try {
+      storageJob = await Promise.any(readiness.map((ready) => ready.then((job) => {
+        if (job.prepareError) throw job.prepareError;
+        return job;
+      })));
+    } catch (_error) {
+      storageJob = await readiness[0];
+    }
+    const storageTab = storageJob.tab;
+    const productIds = items.map(({ product }) => String(product.id));
+    const [{ result: initialQuantities }] = await executeScriptWhenReady({
+      target: { tabId: storageTab.id },
+      func: readFairPriceCartQuantities,
+      args: [productIds],
+    });
+
+    // Accumulate targets so two ingredients selecting the same FairPrice SKU
+    // still produce the combined quantity instead of racing each other.
+    const targetByProductId = { ...initialQuantities };
+    for (const { product, quantity } of items) {
+      const productId = String(product.id);
+      targetByProductId[productId] = (targetByProductId[productId] || 0)
+        + Math.max(1, Math.floor(Number(quantity) || 1));
+    }
+
+    nativeStarted = true;
+    sendProgress({
+      stage: "streaming_native",
+      current: 0,
+      completed: 0,
+      total: items.length,
+    });
+
+    let nativeCompleted = 0;
+    let mutationChain = Promise.resolve();
+    const nativeAttempts = Array(items.length);
+
+    function enqueueNativeMutation(job, index) {
+      const queuedMutation = mutationChain.then(async () => {
+        const { product, quantity, tab, nativeButtonReady, prepareError } = job;
+        let nativeResult = {
+          verified: false,
+          reason: prepareError?.message || "native add button unavailable",
         };
-        results.push(result);
-        sendProgress({ ...progress, stage: "complete", method: result.method });
-      } catch (error) {
-        const result = {
+
+        sendProgress({
+          stage: "native",
+          current: index + 1,
+          completed: nativeCompleted,
+          total: items.length,
           productId: String(product.id),
           productName: product.name,
-          method: "failed",
-          reason: error.message,
-        };
-        results.push(result);
-        sendProgress({ ...progress, stage: "complete", method: result.method });
-      }
+        });
+
+        if (!prepareError && nativeButtonReady) {
+          try {
+            [{ result: nativeResult }] = await executeScriptWhenReady({
+              target: { tabId: tab.id },
+              func: tryNativeAdd,
+              args: [product.id, quantity, 2_500],
+            });
+          } catch (error) {
+            nativeResult = { verified: false, reason: error.message };
+          }
+        }
+
+        // Give FairPrice's cart state listeners a brief chance to finish their
+        // own write before the next product reads the shared cart snapshot.
+        await new Promise((resolve) => setTimeout(resolve, 180));
+
+        nativeAttempts[index] = nativeResult;
+        nativeCompleted += 1;
+        sendProgress({
+          stage: "native_result",
+          current: index + 1,
+          completed: nativeCompleted,
+          total: items.length,
+          productId: String(product.id),
+          productName: product.name,
+          nativeVerified: nativeResult.verified,
+        });
+        return nativeResult;
+      });
+
+      // Keep the queue usable even if an unexpected job error escapes. Normal
+      // native failures are captured above and repaired by reconciliation.
+      mutationChain = queuedMutation.catch(() => {});
+      return queuedMutation;
+    }
+
+    // Release every page that is already ready, in readiness order. Pages that
+    // finish later join the same queue immediately and never wait for the
+    // slowest product page.
+    releaseNativeQueue();
+    await Promise.all(queuedReadiness);
+    await mutationChain;
+
+    sendProgress({ stage: "reconciling", current: items.length, total: items.length });
+    const uniqueProducts = new Map();
+    for (const { product } of items) uniqueProducts.set(String(product.id), product);
+    const reconciliationEntries = Array.from(uniqueProducts, ([productId, product]) => ({
+      product,
+      targetQuantity: targetByProductId[productId],
+    }));
+
+    // Destroy every product page before the final write so a late native event
+    // cannot overwrite the reconciled cart. Reuse the first-ready tab only as
+    // a short-lived same-origin coordinator, then navigate it to the cart.
+    await Promise.all(tabs
+      .filter((tab) => tab.id !== storageTab.id)
+      .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+    await navigateTabAndWait(storageTab.id, FAIRPRICE_SYNC_URL);
+    const [{ result: reconciliation }] = await executeScriptWhenReady({
+      target: { tabId: storageTab.id },
+      func: reconcileFairPriceCart,
+      args: [reconciliationEntries],
+    });
+    const reconciliationById = Object.fromEntries(reconciliation.map((entry) => [entry.productId, entry]));
+
+    for (let index = 0; index < items.length; index += 1) {
+      const { product } = items[index];
+      const productId = String(product.id);
+      const reconciled = reconciliationById[productId];
+      const reachedTarget = reconciled?.quantity >= targetByProductId[productId];
+      const method = reachedTarget
+        ? (reconciled.changed ? "localStorage" : "native")
+        : "failed";
+      const result = {
+        productId,
+        productName: product.name,
+        quantity: reconciled?.quantity || 0,
+        method,
+        reason: method === "failed"
+          ? "cart reconciliation did not reach the requested quantity"
+          : nativeAttempts[index]?.reason,
+      };
+      results.push(result);
+      sendProgress({
+        stage: "complete",
+        current: index + 1,
+        total: items.length,
+        productId,
+        productName: product.name,
+        method,
+      });
     }
 
     sendProgress({ stage: "finished", current: items.length, total: items.length });
-    await chrome.tabs.update(tab.id, { active: true, url: FAIRPRICE_CART_URL });
+    await chrome.tabs.update(storageTab.id, { active: true, url: FAIRPRICE_CART_URL });
     return results;
   } catch (error) {
-    await chrome.tabs.remove(tab.id).catch(() => {});
+    await Promise.all(tabs.map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
     throw error;
   }
 }

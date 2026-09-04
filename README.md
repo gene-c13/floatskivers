@@ -9,21 +9,34 @@ After building a shopping list, the extension automatically searches every
 ingredient and selects the closest in-stock FairPrice result. Each ingredient
 shows the selected product link, pack size, price, planned pack count, and a
 link to the full search results for review. Choose **Add to FairPrice Cart**
-at the bottom to write all matched products to FairPrice's guest `cart`
-local-storage entry in one batch and open the cart for final review.
+at the bottom to add all matched products through FairPrice's native controls,
+use a guest-cart reconciliation fallback where necessary, and open the cart
+for final review.
 
-Cart additions run sequentially in one background FairPrice tab. For each
-product the extension waits for FairPrice's native **Add to cart** control,
-clicks it, and verifies that the guest-cart quantity changed. If the native
-control is missing or does not reach the requested quantity, only that
-product falls back to the compatible local-storage cart entry. The tab moves
-to the next product even if one addition fails, then opens the cart when the
-whole queue finishes.
+The extension opens every matched product page in background tabs at once.
+After the first usable page establishes the initial cart quantities, each page
+joins a readiness-driven queue as soon as its native **Add to cart** button is
+available; a slow product no longer blocks faster ones. Cart clicks run one at
+a time with a brief settle window because concurrent FairPrice tabs can
+overwrite the same guest-cart snapshot. Once all attempts settle, the product
+tabs are destroyed and a single atomic reconciliation pass fills any missing
+product, enforces every requested pack count, and opens the cart.
+
+Weight-based recipe quantities are converted to enough retail packs to cover
+the requested weight. Bare counts, whole items, and cans also preserve
+quantities greater than one, accounting for multipacks when FairPrice exposes a
+piece count in the product's display unit.
+
+Product navigation uses FairPrice's canonical slug directly; the slug already
+contains an item number when FairPrice requires one. Ingredient-specific search
+normalization and derivative penalties keep whole foods such as baking potatoes
+from matching starch or flour. The final reconciliation synchronizes both
+`cart` and FairPrice's cached `sellerCart` quantities.
 
 The popup shows the current product and cart stage, an animated progress bar,
-and a native/fallback/failed state beside each match. Product processing starts
-when the document commits instead of waiting for nonessential images and
-analytics, and the native timeout is kept short before using the fallback.
+and a native/fallback/failed state beside each match. Product documents start
+processing when they commit instead of waiting for nonessential images and
+analytics.
 
 The extension uses the site's own search-page product payload, not an
 undocumented product API. When both recipe and pack sizes are weight-based,
