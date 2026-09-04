@@ -6,7 +6,7 @@
   "permissions": ["activeTab", "storage", "tabs", "scripting"],
   "host_permissions": [
     "https://floatskivers.onrender.com/*",
-    "https://www.allrecipes.com/*"
+    "https://*.allrecipes.com/*"
   ],
   "action": {
     "default_popup": "popup.html"

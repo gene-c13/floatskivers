@@ -74,7 +74,7 @@ document.getElementById("addPage").addEventListener("click", async () => {
     });
     html = result;
   } catch (err) {
-    setStatus("Could not read this page's content.");
+    setStatus(`Could not read this page's content: ${err.message}`);
     return;
   }
 
