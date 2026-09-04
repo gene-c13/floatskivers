@@ -4,10 +4,61 @@ const recipeListEl = document.getElementById("recipeList");
 const statusEl = document.getElementById("status");
 const resultEl = document.getElementById("result");
 const addAllButton = document.getElementById("addAll");
+const resultsPanelEl = document.getElementById("resultsPanel");
+const recipeCountEl = document.getElementById("recipeCount");
+const matchCountEl = document.getElementById("matchCount");
+const cartProgressEl = document.getElementById("cartProgress");
+const progressCountEl = document.getElementById("progressCount");
+const progressProductEl = document.getElementById("progressProduct");
+const progressBarEl = document.getElementById("progressBar");
+const progressStageEl = document.getElementById("progressStage");
 const FAIRPRICE_ORIGIN = "https://www.fairprice.com.sg";
 const FAIRPRICE_SEARCH_URL = `${FAIRPRICE_ORIGIN}/search?query=`;
 const productSearchCache = new Map();
 let selectedMatches = [];
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "FAIRPRICE_ADD_PROGRESS") return;
+  updateCartProgress(message);
+});
+
+function updateCartProgress(message) {
+  const total = Math.max(1, Number(message.total) || selectedMatches.length || 1);
+  const current = Math.max(1, Number(message.current) || 1);
+  const completed = message.stage === "complete" ? current : current - 1;
+  const percentage = message.stage === "finished" ? 100 : Math.round((completed / total) * 100);
+  const stageLabels = {
+    opening: "Opening product page in the background…",
+    native: "Waiting for FairPrice’s native Add to cart button…",
+    fallback: "Native cart was slow — using the safe fallback…",
+    complete: message.method === "native"
+      ? "Added with FairPrice’s native cart"
+      : message.method === "localStorage"
+        ? "Added with the cart fallback"
+        : "Could not add this product",
+    finished: "Finished — opening your FairPrice cart…",
+  };
+
+  cartProgressEl.classList.add("visible");
+  progressCountEl.textContent = message.stage === "finished" ? `${total} / ${total}` : `${current} / ${total}`;
+  progressProductEl.textContent = message.productName || "All products processed";
+  progressBarEl.style.width = `${percentage}%`;
+  progressStageEl.textContent = stageLabels[message.stage] || "Working in the background…";
+
+  const activeRow = Array.from(resultEl.querySelectorAll(".item"))
+    .find((row) => row.dataset.queueIndex === String(current));
+  if (activeRow) {
+    activeRow.dataset.state = message.stage === "complete" ? message.method : "active";
+    if (message.stage === "complete") {
+      const meta = activeRow.querySelector(".chosen-meta");
+      if (meta) {
+        const method = message.method === "native" ? "Native cart ✓" : message.method === "localStorage" ? "Fallback ✓" : "Failed";
+        meta.textContent = `${meta.dataset.baseText || meta.textContent} · ${method}`;
+      }
+    }
+    activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -28,6 +79,7 @@ async function saveRecipes(recipes) {
 
 async function renderRecipeList() {
   const recipes = await getRecipes();
+  recipeCountEl.textContent = String(recipes.length);
   clearChildren(recipeListEl);
   for (const recipe of recipes) {
     const li = document.createElement("li");
@@ -272,6 +324,7 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
   meta.textContent = [productPackSize(product), productPrice(product), packLabel]
     .filter(Boolean)
     .join(" · ");
+  meta.dataset.baseText = meta.textContent;
 
   const searchLink = document.createElement("a");
   searchLink.className = "chosen-meta";
@@ -283,11 +336,15 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
   choiceEl.appendChild(link);
   choiceEl.appendChild(meta);
   choiceEl.appendChild(searchLink);
+  choiceEl.closest(".item").dataset.productId = String(product.id);
 }
 
 async function renderResult(data) {
   clearChildren(resultEl);
   selectedMatches = [];
+  resultsPanelEl.hidden = false;
+  cartProgressEl.classList.remove("visible");
+  progressBarEl.style.width = "0%";
   addAllButton.hidden = false;
   addAllButton.disabled = true;
   addAllButton.textContent = "Finding FairPrice matches…";
@@ -309,7 +366,7 @@ async function renderResult(data) {
       const product = chooseBestProduct(item, products);
       const quantity = product ? recommendedPackCount(item, product) : 0;
       showSelectedProduct(choice, item, product, quantity);
-      return product ? { item, product, quantity } : null;
+      return product ? { item, product, quantity, row: choice.closest(".item") } : null;
     } catch (error) {
       choice.className = "flag";
       choice.textContent = `FairPrice search failed: ${error.message}`;
@@ -321,7 +378,11 @@ async function renderResult(data) {
   });
 
   selectedMatches = matches.filter(Boolean);
+  selectedMatches.forEach((match, index) => {
+    match.row.dataset.queueIndex = String(index + 1);
+  });
   const missing = items.length - selectedMatches.length;
+  matchCountEl.textContent = `${selectedMatches.length}/${items.length}`;
   addAllButton.disabled = selectedMatches.length === 0;
   addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
   setStatus(
@@ -337,6 +398,11 @@ addAllButton.addEventListener("click", async () => {
   addAllButton.disabled = true;
   addAllButton.textContent = "Adding to FairPrice Cart…";
   setStatus(`Adding ${selectedMatches.length} ingredients…`);
+  cartProgressEl.classList.add("visible");
+  progressCountEl.textContent = `0 / ${selectedMatches.length}`;
+  progressProductEl.textContent = "Preparing the first product…";
+  progressBarEl.style.width = "0%";
+  progressStageEl.textContent = "Starting background cart worker…";
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -344,8 +410,19 @@ addAllButton.addEventListener("click", async () => {
       items: selectedMatches.map(({ product, quantity }) => ({ product, quantity })),
     });
     if (!response?.ok) throw new Error(response?.error || "FairPrice could not add the ingredients.");
+    const added = response.result.filter((item) => item.method !== "failed");
+    const native = added.filter((item) => item.method === "native").length;
+    const fallback = added.filter((item) => item.method === "localStorage").length;
+    const failed = response.result.length - added.length;
     addAllButton.textContent = "Added to FairPrice Cart";
-    setStatus(`Added ${response.result.length} ingredients. FairPrice cart opened.`);
+    progressBarEl.style.width = "100%";
+    progressCountEl.textContent = `${response.result.length} / ${response.result.length}`;
+    progressProductEl.textContent = "Cart ready";
+    progressStageEl.textContent = "Finished — opening your FairPrice cart…";
+    setStatus(
+      `Added ${added.length} ingredients (${native} native, ${fallback} fallback)`
+      + `${failed ? `; ${failed} failed` : ""}. FairPrice cart opened.`,
+    );
   } catch (error) {
     addAllButton.disabled = false;
     addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
@@ -363,6 +440,8 @@ document.getElementById("buildList").addEventListener("click", async () => {
   setStatus("Building shopping list...");
   clearChildren(resultEl);
   selectedMatches = [];
+  resultsPanelEl.hidden = true;
+  cartProgressEl.classList.remove("visible");
   addAllButton.hidden = true;
   addAllButton.disabled = true;
 

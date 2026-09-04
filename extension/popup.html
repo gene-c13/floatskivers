@@ -2,36 +2,175 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Recipe to FairPrice Cart</title>
   <style>
-    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; font-size: 13px; }
-    h1 { font-size: 14px; margin: 0 0 8px; }
-    button { width: 100%; padding: 6px; margin-bottom: 8px; cursor: pointer; }
-    ul { list-style: none; padding: 0; margin: 0 0 8px; }
-    li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #eee; }
-    li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    li button { width: auto; margin: 0; padding: 2px 6px; }
-    #status { color: #555; margin-bottom: 8px; }
-    #result { max-height: 310px; overflow-y: auto; }
-    .item { padding: 7px 0; border-bottom: 1px solid #f2f2f2; }
-    .item-head { display: flex; justify-content: space-between; gap: 8px; }
-    .item-name { font-weight: 600; }
-    .item-quantity { color: #555; white-space: nowrap; }
-    .chosen-product { display: block; margin-top: 4px; line-height: 1.25; }
-    .chosen-meta { color: #555; display: block; font-size: 11px; margin-top: 2px; }
-    .searching { color: #777; display: block; font-size: 11px; margin-top: 4px; }
-    #addAll { margin: 10px 0 0; }
-    .flag { color: #b00; }
+    :root {
+      color-scheme: light;
+      --ink: #18251f;
+      --muted: #67746d;
+      --line: #e5ece8;
+      --surface: rgba(255, 255, 255, .94);
+      --green: #0b7a4b;
+      --green-dark: #075c39;
+      --green-soft: #e8f6ef;
+      --orange: #f28c28;
+      --red: #d9382b;
+      --shadow: 0 12px 35px rgba(17, 62, 42, .12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      width: 390px;
+      min-height: 440px;
+      margin: 0;
+      color: var(--ink);
+      font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 100% 0, rgba(242, 140, 40, .16), transparent 34%),
+        linear-gradient(155deg, #f3fbf6 0%, #f8faf9 48%, #fff9f2 100%);
+    }
+
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; }
+
+    .app { padding: 16px; }
+    .hero { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 13px;
+      color: white;
+      font-weight: 800;
+      letter-spacing: -.5px;
+      background: linear-gradient(135deg, var(--green) 0 58%, var(--orange) 58%);
+      box-shadow: 0 8px 20px rgba(11, 122, 75, .22);
+    }
+    h1 { margin: 0; font-size: 18px; letter-spacing: -.4px; }
+    .tagline { margin: 1px 0 0; color: var(--muted); font-size: 11px; }
+
+    .panel {
+      padding: 12px;
+      margin-bottom: 10px;
+      border: 1px solid rgba(213, 226, 219, .9);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .count-badge { padding: 2px 7px; border-radius: 99px; color: var(--green); background: var(--green-soft); }
+
+    .button {
+      width: 100%;
+      min-height: 40px;
+      padding: 9px 12px;
+      border: 0;
+      border-radius: 11px;
+      cursor: pointer;
+      font-weight: 720;
+      transition: transform .16s ease, box-shadow .16s ease, opacity .16s ease;
+    }
+    .button:hover:not(:disabled) { transform: translateY(-1px); }
+    .button:active:not(:disabled) { transform: translateY(0) scale(.99); }
+    .button:disabled { cursor: default; opacity: .62; }
+    .button-primary { color: #fff; background: linear-gradient(135deg, var(--green), var(--green-dark)); box-shadow: 0 8px 20px rgba(11, 122, 75, .2); }
+    .button-secondary { color: var(--green-dark); border: 1px solid #cfe2d8; background: #fff; }
+    .button-cart { margin-top: 10px; color: #fff; background: linear-gradient(135deg, #e55531, #f28c28); box-shadow: 0 8px 20px rgba(229, 85, 49, .22); }
+
+    ul { list-style: none; padding: 0; margin: 8px 0 10px; }
+    li { display: flex; align-items: center; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
+    li span { flex: 1; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    li button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 8px; color: #8b514b; cursor: pointer; background: #fff0ee; }
+
+    #status { min-height: 18px; margin: 8px 2px 0; color: var(--muted); font-size: 11px; }
+    #result { max-height: 330px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #cbd8d1 transparent; }
+    .item { position: relative; padding: 10px 3px 10px 13px; border-bottom: 1px solid var(--line); animation: rise-in .28s ease both; }
+    .item::before { content: ""; position: absolute; left: 1px; top: 14px; width: 6px; height: 6px; border-radius: 50%; background: #b9c8c0; transition: all .2s ease; }
+    .item[data-state="active"]::before { background: var(--orange); box-shadow: 0 0 0 5px rgba(242, 140, 40, .14); animation: pulse 1.1s ease infinite; }
+    .item[data-state="native"]::before { background: var(--green); }
+    .item[data-state="fallback"]::before { background: var(--orange); }
+    .item[data-state="failed"]::before { background: var(--red); }
+    .item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .item-name { overflow: hidden; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+    .item-quantity { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .chosen-product { display: block; overflow: hidden; margin-top: 4px; color: var(--green-dark); font-size: 12px; font-weight: 600; line-height: 1.25; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+    .chosen-product:hover { text-decoration: underline; }
+    .chosen-meta { display: block; margin-top: 2px; color: var(--muted); font-size: 10.5px; text-decoration: none; }
+    a.chosen-meta:hover { color: var(--green); }
+    .searching { display: block; width: 74%; height: 10px; margin-top: 7px; border-radius: 5px; color: transparent; background: linear-gradient(90deg, #edf2ef 25%, #f9fbfa 50%, #edf2ef 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+    .flag { color: var(--red); }
+
+    .progress-card { display: none; padding: 12px; margin-bottom: 10px; border: 1px solid #f3d6bb; border-radius: 14px; background: rgba(255, 250, 244, .96); box-shadow: 0 9px 25px rgba(165, 91, 25, .1); }
+    .progress-card.visible { display: block; animation: rise-in .24s ease both; }
+    .progress-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .progress-eyebrow { color: #a65a16; font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    #progressCount { color: #a65a16; font-size: 11px; font-weight: 700; }
+    #progressProduct { overflow: hidden; margin: 4px 0 8px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+    .progress-track { height: 7px; overflow: hidden; border-radius: 99px; background: #f3dfcb; }
+    #progressBar { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #e55531, var(--orange)); transition: width .35s ease; position: relative; }
+    #progressBar::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.58), transparent); transform: translateX(-100%); animation: sweep 1.25s ease infinite; }
+    #progressStage { margin-top: 6px; color: var(--muted); font-size: 10.5px; }
+
+    [hidden] { display: none !important; }
+    @keyframes rise-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+    @keyframes pulse { 50% { transform: scale(1.25); } }
+    @keyframes sweep { to { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   </style>
 </head>
 <body>
-  <h1>Recipe to FairPrice Cart</h1>
-  <button id="addPage">Add this page as a recipe</button>
-  <ul id="recipeList"></ul>
-  <button id="buildList">Build shopping list</button>
-  <div id="status"></div>
-  <div id="result"></div>
-  <button id="addAll" hidden disabled>Add to FairPrice Cart</button>
+<main class="app">
+  <header class="hero">
+    <div class="brand-mark" aria-hidden="true">R→</div>
+    <div>
+      <h1>Recipe Cart</h1>
+      <p class="tagline">From recipe tab to FairPrice cart</p>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="panel-title">
+      <span>Recipes</span>
+      <span id="recipeCount" class="count-badge">0</span>
+    </div>
+    <button id="addPage" class="button button-secondary">＋ Add current recipe</button>
+    <ul id="recipeList"></ul>
+    <button id="buildList" class="button button-primary">Build shopping list</button>
+    <div id="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <section id="cartProgress" class="progress-card" aria-live="polite">
+    <div class="progress-top">
+      <span class="progress-eyebrow">Adding to cart</span>
+      <span id="progressCount">0 / 0</span>
+    </div>
+    <div id="progressProduct">Preparing products…</div>
+    <div class="progress-track"><div id="progressBar"></div></div>
+    <div id="progressStage">Starting background cart worker…</div>
+  </section>
+
+  <section id="resultsPanel" class="panel" hidden>
+    <div class="panel-title"><span>Matched products</span><span id="matchCount" class="count-badge">0</span></div>
+    <div id="result"></div>
+    <button id="addAll" class="button button-cart" hidden disabled>Add to FairPrice Cart</button>
+  </section>
+</main>
   <script src="popup.js"></script>
 </body>
 </html>
