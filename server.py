@@ -1,0 +1,59 @@
+"""Local backend for the browser extension.
+
+Wraps recipe_parser so the extension (JavaScript) can call the already
+tested Python parsing/merging logic over HTTP instead of it being ported
+to JS. Not deployed anywhere yet: run locally with
+
+    python3 server.py
+
+and the extension talks to http://localhost:5050.
+
+Not port 5000: macOS's AirPlay Receiver (ControlCenter) squats on it and
+returns 403 to anything it doesn't recognize as an AirPlay request.
+"""
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+
+from recipe_parser import build_shopping_list, parse_recipe
+
+app = Flask(__name__)
+CORS(app)
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/shopping-list", methods=["POST"])
+def shopping_list():
+    data = request.get_json(force=True, silent=True) or {}
+    urls = data.get("urls", [])
+    if not urls:
+        return jsonify({"error": "no urls provided"}), 400
+
+    recipes = []
+    parsed = []
+    errors = []
+    for url in urls:
+        try:
+            recipe = parse_recipe(url)
+            recipes.append(recipe)
+            parsed.append({"title": recipe["title"], "url": url})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"url": url, "error": str(exc)})
+
+    items, skipped = build_shopping_list(recipes) if recipes else ([], [])
+
+    return jsonify({
+        "recipes": parsed,
+        "shopping_list": items,
+        "skipped": skipped,
+        "errors": errors,
+    })
+
+
+if __name__ == "__main__":
+    # debug=False: this gets tunneled to a public URL for the demo, and
+    # Flask's debugger is a known remote-code-execution risk once exposed.
+    app.run(port=5050, debug=False)

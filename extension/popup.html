@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Recipe to FairPrice Cart</title>
+  <style>
+    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; font-size: 13px; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    button { width: 100%; padding: 6px; margin-bottom: 8px; cursor: pointer; }
+    ul { list-style: none; padding: 0; margin: 0 0 8px; }
+    li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #eee; }
+    li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    li button { width: auto; margin: 0; padding: 2px 6px; }
+    #status { color: #555; margin-bottom: 8px; }
+    #result { max-height: 260px; overflow-y: auto; }
+    .item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #f2f2f2; }
+    .flag { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1>Recipe to FairPrice Cart</h1>
+  <button id="addPage">Add this page as a recipe</button>
+  <ul id="recipeList"></ul>
+  <button id="buildList">Build shopping list</button>
+  <div id="status"></div>
+  <div id="result"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
