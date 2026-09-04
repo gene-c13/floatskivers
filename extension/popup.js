@@ -1,4 +1,4 @@
-const BACKEND_URL = "https://allowing-pork-immediate-homepage.trycloudflare.com/shopping-list";
+const BACKEND_URL = "https://floatskivers.onrender.com";
 
 const recipeListEl = document.getElementById("recipeList");
 const statusEl = document.getElementById("status");
