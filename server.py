@@ -63,17 +63,22 @@ def shopping_list():
 
 @app.route("/pick-products", methods=["POST"])
 def pick_products():
-    """Given a shopping_list (from /shopping-list), let the Bedrock agent
-    search FairPrice and pick a product + quantity for each item — this is
-    what extension/popup.js now calls instead of doing its own
-    scoreProduct/chooseBestProduct ranking client-side. Requires AWS
-    credentials with Bedrock access in this process's environment, same as
-    running agent.py locally does.
+    """Given items already searched and ranked by extension/popup.js
+    (scoreProduct/rankFairPriceMatches — the cart team's own logic, not
+    reimplemented here), let the Bedrock agent make the final call on each
+    one: which candidate to add, and how many. popup.js still does the
+    actual FairPrice search itself; this endpoint only ever decides.
+
+    Expects {"items": [{"name", "quantity", "unit",
+    "needs_manual_reconciliation", "is_substitute", "candidates": [
+    {"product": <raw FairPrice product>, "score", "recommended_quantity"},
+    ...]}, ...]}. Requires AWS credentials with Bedrock access in this
+    process's environment, same as running agent.py locally does.
     """
     data = request.get_json(force=True, silent=True) or {}
-    items = data.get("shopping_list", [])
+    items = data.get("items", [])
     if not items:
-        return jsonify({"error": "no shopping_list provided"}), 400
+        return jsonify({"error": "no items provided"}), 400
 
     picks = []
     for item in items:

@@ -9,6 +9,7 @@ Two separate checks, because they fail for different reasons:
 """
 
 import json
+import os
 import sys
 
 import boto3
@@ -23,7 +24,12 @@ MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
 
 def main() -> None:
-    session = boto3.Session()
+    # AWS_PROFILE names an `aws configure sso` profile in .env — SSO login
+    # sessions last hours instead of the ~15-45 minutes of the manually
+    # copy-pasted access keys this used to rely on. `profile_name=None`
+    # (the value if AWS_PROFILE isn't set) falls back to boto3's normal
+    # default credential chain, so this still works without SSO configured.
+    session = boto3.Session(profile_name=os.environ.get("AWS_PROFILE"))
 
     print("1. checking credentials...")
     try:

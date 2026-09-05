@@ -1,16 +1,24 @@
-"""The real agent: parses recipes, merges them into one shopping list, then
-runs a tool-calling loop against Bedrock so the model can search and add
-each item to the FairPrice cart. See CONTRACT.md for every shape below.
+"""The real agent. Two separate entry points:
 
-parse_recipe / build_shopping_list are real (recipe_parser/, Hong Ting).
-search_products / add_to_cart are stubbed in tools/cart.py until the cart
-team's code lands — swapping them in later shouldn't require touching this
-file, since agent.py only ever sees CONTRACT.md's shapes.
+1. main() — a standalone CLI demo: parses recipes, merges them into one
+   shopping list, then runs a tool-calling loop against Bedrock where the
+   model calls search_products (real FairPrice search, tools/cart.py) and
+   add_to_cart (still stubbed — a headless script can't write to a real
+   FairPrice cart) as it sees fit. Run with:
 
-    python agent.py <recipe_url> [<recipe_url> ...]
+       python agent.py <recipe_url> [<recipe_url> ...]
+
+2. choose_product_for_item() — used by server.py's /pick-products
+   endpoint, which extension/popup.js calls for real, live use. Here the
+   *searching and ranking* already happened in the browser (popup.js's
+   scoreProduct/rankFairPriceMatches — the cart team's code, not a
+   reimplementation of it), so this only ever makes the final decision
+   given candidates it's handed, and the browser does the actual
+   add-to-cart itself via background.js. See CONTRACT.md.
 """
 
 import json
+import os
 import sys
 import time
 
@@ -20,7 +28,7 @@ from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from dotenv import load_dotenv
 
 from recipe_parser import build_shopping_list, parse_recipe
-from tools.cart import add_to_cart, recommended_pack_count, search_and_rank_raw, search_products
+from tools.cart import add_to_cart, search_products
 
 load_dotenv()
 
@@ -33,7 +41,12 @@ MIN_STEPS = 10
 # raising, so our own retry-with-backoff loop below never gets a chance to
 # run. Found by watching a real run sit on one open connection for 30+
 # minutes with a client that had no timeout configured at all.
-client = boto3.Session().client(
+#
+# AWS_PROFILE names an `aws configure sso` profile in .env — SSO login
+# sessions last hours instead of the ~15-45 minutes of manually
+# copy-pasted access keys. profile_name=None (if AWS_PROFILE isn't set)
+# falls back to boto3's normal default credential chain.
+client = boto3.Session(profile_name=os.environ.get("AWS_PROFILE")).client(
     "bedrock-runtime",
     region_name="ap-southeast-1",
     config=Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 0}),
@@ -192,52 +205,61 @@ _CONFIDENT_MIN_GAP = 50
 
 
 def choose_product_for_item(item: dict) -> dict:
-    """Search FairPrice for one shopping-list item and pick a candidate (if
-    any) to add, and how many.
+    """Decide which candidate (if any) to add for one shopping-list item,
+    and how many.
 
-    Used by server.py's /pick-products endpoint, which extension/popup.js
-    calls instead of doing its own scoreProduct/chooseBestProduct ranking
-    in JS. The actual add-to-cart step still happens in the browser via
-    background.js, since that needs a real FairPrice tab — this only
-    decides *what* to add.
+    Search and ranking are not this function's job — extension/popup.js
+    already did that (scoreProduct/rankFairPriceMatches, the same scoring
+    the extension always used, including the derivative-word penalty and
+    pack-size fit) before calling server.py's /pick-products endpoint.
+    `item` carries the ranked results it found:
+      - "candidates": [{"product": <raw FairPrice product>, "score": float,
+         "recommended_quantity": int}, ...], best-ranked first
+      - "is_substitute": bool — true if popup.js only found these after
+        broadening the search, because the exact ingredient had no
+        in-stock match
+
+    This function only ever decides — never searches — so it stays correct
+    automatically as the cart team keeps improving their ranking; it isn't
+    a second copy of that logic that could drift out of sync.
 
     Most items have an obvious best match, so this only calls Bedrock when
-    the deterministic ranking (same scoring as extension/popup.js) isn't
-    decisive — a real tie, a weak top score, or an ingredient already
-    flagged as needing manual reconciliation. Calling the model on every
-    single item, one at a time, turned out to be far too slow under this
-    account's Bedrock throttling for a real recipe's worth of ingredients;
-    reserving it for genuinely ambiguous cases keeps most items fast while
-    still giving the model's judgment somewhere to matter.
+    the ranking isn't decisive — a real tie, a weak top score, a flagged
+    substitute, or an ingredient already needing manual reconciliation.
+    Calling the model on every single item, one at a time, turned out to
+    be far too slow under this account's Bedrock throttling for a real
+    recipe's worth of ingredients; reserving it for genuinely ambiguous
+    cases keeps most items fast while still giving the model's judgment
+    somewhere to matter.
 
-    When the exact ingredient has no viable (in-stock) match, search_and_
-    rank_raw already broadened the search for us (see its docstring) — in
-    that case this always goes through the model, never the fast path,
-    and the result comes back flagged is_substitute: true so the caller
-    can ask before treating it like a normal match (see extension/popup.js,
-    which shows these separately and requires an explicit opt-in before
-    adding one to the cart).
+    A substitute always goes through the model, never the fast path, and
+    comes back flagged is_substitute: true so popup.js can ask before
+    treating it like a normal match (it shows these separately and
+    requires an explicit opt-in before adding one to the cart).
 
     Returns {"name", "product", "quantity", "reason", "decided_by",
     "is_substitute"} — "product" is the raw FairPrice object (or None if
     skipped/no match), ready to hand straight to background.js the same
     way a client-side pick would be. "decided_by" is "rules" or "agent".
     """
-    quantity_hint = None if item.get("needs_manual_reconciliation") else item.get("quantity")
-    unit_hint = None if item.get("needs_manual_reconciliation") else item.get("unit")
+    name = item["name"]
+    candidates = item.get("candidates") or []
+    is_substitute = bool(item.get("is_substitute"))
 
-    candidates, raw_by_id, scores, is_substitute = search_and_rank_raw(
-        item["name"], quantity_hint, unit_hint, limit=8
-    )
     if not candidates:
         return {
-            "name": item["name"],
+            "name": name,
             "product": None,
             "quantity": 0,
             "reason": "no FairPrice matches found, even after broadening the search",
             "decided_by": "search",
             "is_substitute": False,
         }
+
+    raw_products = [c["product"] for c in candidates]
+    scores = [c["score"] for c in candidates]
+    quantities = [c.get("recommended_quantity") or 1 for c in candidates]
+    raw_by_id = {str(p["id"]): p for p in raw_products}
 
     is_hard_case = is_substitute or bool(item.get("needs_manual_reconciliation"))
     if not is_hard_case:
@@ -246,18 +268,31 @@ def choose_product_for_item(item: dict) -> dict:
         is_hard_case = not (top_score >= _CONFIDENT_MIN_SCORE and (top_score - runner_up) >= _CONFIDENT_MIN_GAP)
 
     if not is_hard_case:
-        top = candidates[0]
         return {
-            "name": item["name"],
-            "product": raw_by_id.get(top["product_id"]),
-            "quantity": recommended_pack_count(quantity_hint, unit_hint, top),
+            "name": name,
+            "product": raw_products[0],
+            "quantity": quantities[0],
             "reason": "clear name/pack-size match, no ambiguity to reason about",
             "decided_by": "rules",
             "is_substitute": False,
         }
 
+    simplified = [
+        {
+            "product_id": str(p["id"]),
+            "name": p.get("name"),
+            "brand": (p.get("brand") or {}).get("name", ""),
+            "pack_size": (p.get("metaData") or {}).get("DisplayUnit")
+            or (p.get("metaData") or {}).get("Unit Of Weight") or "",
+            "recommended_quantity": q,
+        }
+        for p, q in zip(raw_products, quantities)
+    ]
+
+    quantity_hint = None if item.get("needs_manual_reconciliation") else item.get("quantity")
+    unit_hint = None if item.get("needs_manual_reconciliation") else item.get("unit")
     substitute_note = (
-        f"\n\nNote: \"{item['name']}\" itself had no in-stock match on FairPrice, "
+        f"\n\nNote: \"{name}\" itself had no in-stock match on FairPrice, "
         "so these candidates come from a broader search and are substitutes, "
         "not the exact ingredient. Only choose one if it's a genuinely "
         "reasonable stand-in; otherwise skip."
@@ -265,11 +300,12 @@ def choose_product_for_item(item: dict) -> dict:
         else ""
     )
     prompt = (
-        f"Ingredient needed: {item['name']}"
+        f"Ingredient needed: {name}"
         + (f", {quantity_hint} {unit_hint}" if quantity_hint else " (quantity unclear)")
         + substitute_note
-        + "\n\nCandidates from FairPrice, best-ranked first:\n"
-        + json.dumps(candidates, indent=2)
+        + "\n\nCandidates from FairPrice, best-ranked first (recommended_quantity "
+        "is how many packs would cover the amount needed):\n"
+        + json.dumps(simplified, indent=2)
         + "\n\nCall choose_product with the best match's product_id and how "
         "many packs to buy, or set skip: true if none of these are a "
         "reasonable match for this ingredient."
@@ -283,7 +319,7 @@ def choose_product_for_item(item: dict) -> dict:
     tool_use = next((b for b in reply["content"] if b["type"] == "tool_use"), None)
     if tool_use is None:
         return {
-            "name": item["name"],
+            "name": name,
             "product": None,
             "quantity": 0,
             "reason": "model gave no decision",
@@ -294,7 +330,7 @@ def choose_product_for_item(item: dict) -> dict:
     decision = tool_use["input"]
     if decision.get("skip") or not decision.get("product_id"):
         return {
-            "name": item["name"],
+            "name": name,
             "product": None,
             "quantity": 0,
             "reason": decision.get("reason", "skipped"),
@@ -303,7 +339,7 @@ def choose_product_for_item(item: dict) -> dict:
         }
 
     return {
-        "name": item["name"],
+        "name": name,
         "product": raw_by_id.get(str(decision["product_id"])),
         "quantity": max(1, int(decision.get("quantity", 1))),
         "reason": decision.get("reason", ""),
