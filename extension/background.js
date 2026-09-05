@@ -50,26 +50,35 @@ async function executeScriptWhenReady(injection, timeoutMs = 4_000) {
   throw lastError || new Error("The FairPrice product document was not ready.");
 }
 
-async function waitForNativeAddButton(timeoutMs) {
+async function waitForNativeCartControl(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const button = document.querySelector('button[data-testid="SvgAddToCart"]')
-      || Array.from(document.querySelectorAll("button")).find((candidate) => {
-        const label = `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`;
-        return /add\s*to\s*cart/i.test(label);
-      });
-    if (button && !button.disabled) return true;
+    const control = Array.from(document.querySelectorAll("button")).find((button) => {
+      if (button.disabled) return false;
+      const testId = button.getAttribute("data-testid") || "";
+      const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""} ${button.textContent || ""}`.trim();
+      return testId === "SvgAddToCart"
+        || /add\s*to\s*cart/i.test(label)
+        || /(increase|increment)/i.test(`${testId} ${label}`)
+        || label === "+";
+    });
+    if (control) {
+      const testId = control.getAttribute("data-testid") || "";
+      const label = `${control.getAttribute("aria-label") || ""} ${control.getAttribute("title") || ""} ${control.textContent || ""}`.trim();
+      return testId === "SvgAddToCart" || /add\s*to\s*cart/i.test(label) ? "add" : "increment";
+    }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  return false;
+  return null;
 }
 
 // Runs in a FairPrice product page. Native page events are used first, and
 // guest-cart localStorage is observed only to confirm that FairPrice accepted
-// each click. If more than one pack is requested, the native increment control
-// is clicked for the remaining packs when available.
-async function tryNativeAdd(productId, requestedQuantity, timeoutMs) {
+// each click. The requested quantity is an absolute recipe target: an existing
+// cart quantity is accepted, and only the missing packs are added.
+async function tryNativeAdd(productId, targetQuantity, timeoutMs) {
   const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const operationDeadline = Date.now() + Math.max(6_000, timeoutMs + 3_500);
 
   function cartQuantity() {
     try {
@@ -81,30 +90,59 @@ async function tryNativeAdd(productId, requestedQuantity, timeoutMs) {
     }
   }
 
+  function findPrimaryCartControl() {
+    for (const button of document.querySelectorAll("button")) {
+      if (button.disabled) continue;
+      const testId = button.getAttribute("data-testid") || "";
+      const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""} ${button.textContent || ""}`.trim();
+      if (testId === "SvgAddToCart" || /add\s*to\s*cart/i.test(label)) {
+        return { type: "add", button };
+      }
+      if (/(increase|increment)/i.test(`${testId} ${label}`) || label === "+") {
+        return { type: "increment", button };
+      }
+    }
+    return null;
+  }
+
   function findAddButton() {
-    return document.querySelector('button[data-testid="SvgAddToCart"]')
-      || Array.from(document.querySelectorAll("button")).find((button) => {
-        const label = `${button.getAttribute("aria-label") || ""} ${button.textContent || ""}`;
-        return /add\s*to\s*cart/i.test(label);
-      });
+    const control = findPrimaryCartControl();
+    return control?.type === "add" ? control.button : null;
   }
 
   function findIncrementButton() {
-    const selectors = [
-      'button[data-testid*="increase" i]',
-      'button[data-testid*="increment" i]',
-      'button[aria-label*="increase" i]',
-      'button[aria-label*="increment" i]',
-      'button[title*="increase" i]',
-    ];
-    for (const selector of selectors) {
-      const button = document.querySelector(selector);
-      if (button) return button;
+    const control = findPrimaryCartControl();
+    return control?.type === "increment" ? control.button : null;
+  }
+
+  function visibleQuantity(incrementButton) {
+    if (!incrementButton) return 0;
+    let scope = incrementButton.parentElement;
+    for (let depth = 0; scope && depth < 4; depth += 1, scope = scope.parentElement) {
+      const input = scope.querySelector('input[type="number"], input[aria-label*="quantity" i], input[data-testid*="quantity" i]');
+      const inputQuantity = Math.floor(Number(input?.value));
+      if (Number.isFinite(inputQuantity) && inputQuantity > 0) return inputQuantity;
+
+      const quantityElement = Array.from(scope.querySelectorAll([
+        '[data-testid*="quantity" i]',
+        '[aria-label*="quantity" i]',
+        "span",
+        "div",
+      ].join(","))).find((element) => {
+        if (element === incrementButton || element.closest("button")) return false;
+        return /^\s*\d{1,3}\s*$/.test(element.textContent || "");
+      });
+      if (quantityElement) return Math.max(0, Math.floor(Number(quantityElement.textContent.trim())) || 0);
     }
-    return Array.from(document.querySelectorAll("button")).find((button) => {
-      const label = `${button.getAttribute("aria-label") || ""} ${button.textContent || ""}`.trim();
-      return label === "+" || /increase\s*(item|quantity)/i.test(label);
-    });
+    return 0;
+  }
+
+  function observedQuantity() {
+    const control = findPrimaryCartControl();
+    return Math.max(
+      cartQuantity(),
+      control?.type === "increment" ? visibleQuantity(control.button) : 0,
+    );
   }
 
   async function waitFor(getValue, waitMs) {
@@ -119,48 +157,69 @@ async function tryNativeAdd(productId, requestedQuantity, timeoutMs) {
 
   async function waitForQuantityAbove(previousQuantity, waitMs) {
     const deadline = Date.now() + waitMs;
-    while (Date.now() < deadline) {
-      const quantity = cartQuantity();
+    while (Date.now() < deadline && Date.now() < operationDeadline) {
+      const quantity = observedQuantity();
       if (quantity > previousQuantity) return quantity;
-      await sleep(250);
+      await sleep(150);
     }
-    return cartQuantity();
+    return observedQuantity();
   }
 
-  const before = cartQuantity();
-  const target = before + Math.max(1, Math.floor(Number(requestedQuantity) || 1));
-  const addButton = await waitFor(findAddButton, timeoutMs);
-  if (!addButton || addButton.disabled) {
-    return { before, after: cartQuantity(), target, verified: false, reason: "add button unavailable" };
+  const target = Math.max(1, Math.floor(Number(targetQuantity) || 1));
+  const before = observedQuantity();
+  if (before >= target) {
+    return { before, after: before, target, verified: true, alreadySatisfied: true, reason: null };
   }
 
-  addButton.click();
-  let after = await waitForQuantityAbove(before, Math.min(timeoutMs, 2_500));
-  let verifiedByNativeControl = false;
-  if (after <= before) {
-    // Signed-in FairPrice carts are account-backed and may not mirror their
-    // quantity into the guest `cart` key. The product quantity stepper replacing
-    // the Add button is the native UI confirmation in that session mode.
-    const incrementButton = await waitFor(findIncrementButton, 1_500);
+  let after = before;
+  const initialControl = await waitFor(
+    findPrimaryCartControl,
+    Math.max(0, Math.min(800, operationDeadline - Date.now())),
+  );
+  let incrementButton = initialControl?.type === "increment" ? initialControl.button : null;
+  const addButton = initialControl?.type === "add" ? initialControl.button : null;
+
+  if (addButton && !addButton.disabled) {
+    addButton.click();
+    after = await waitForQuantityAbove(before, Math.min(timeoutMs, 2_500));
+    if (after <= before) {
+      incrementButton = await waitFor(
+        findIncrementButton,
+        Math.max(0, Math.min(1_200, operationDeadline - Date.now())),
+      );
+      if (!incrementButton || incrementButton.disabled) {
+        return { before, after, target, verified: false, reason: "cart quantity did not change" };
+      }
+      // Account-backed carts may expose the native stepper without mirroring
+      // their quantity to guest localStorage.
+      after = Math.max(before + 1, visibleQuantity(incrementButton));
+    }
+  } else if (incrementButton && !incrementButton.disabled) {
+    // The product was already present when this page loaded. If FairPrice does
+    // not expose the numeric value, the presence of its stepper proves one pack.
+    after = Math.max(before, visibleQuantity(incrementButton), 1);
+  } else {
+    return { before, after, target, verified: false, reason: "native cart control unavailable" };
+  }
+
+  while (after < target && Date.now() < operationDeadline) {
+    incrementButton = await waitFor(
+      findIncrementButton,
+      Math.max(0, Math.min(1_200, operationDeadline - Date.now())),
+    );
     if (!incrementButton || incrementButton.disabled) {
-      return { before, after, target, verified: false, reason: "cart quantity did not change" };
+      break;
     }
-    verifiedByNativeControl = true;
-    after = before + 1;
-  }
-
-  while (after < target) {
-    const incrementButton = await waitFor(findIncrementButton, 1_500);
-    if (!incrementButton || incrementButton.disabled) break;
     const previous = after;
     incrementButton.click();
-    if (verifiedByNativeControl) {
-      await sleep(300);
+    after = await waitForQuantityAbove(
+      previous,
+      Math.max(0, Math.min(1_200, operationDeadline - Date.now())),
+    );
+    if (after <= previous) {
+      await sleep(180);
       if (!findIncrementButton()) break;
       after = previous + 1;
-    } else {
-      after = await waitForQuantityAbove(previous, 2_500);
-      if (after <= previous) break;
     }
   }
 
@@ -276,19 +335,6 @@ function reconcileFairPriceCart(entries) {
     ...result,
     quantity: Math.max(0, Number(savedCart[result.productId]?.q ?? savedCart[result.productId]?.count ?? 0) || 0),
   }));
-}
-
-function readFairPriceCartQuantities(productIds) {
-  try {
-    const cart = JSON.parse(localStorage.getItem("cart") || "{}");
-    return Object.fromEntries(productIds.map((productId) => {
-      const entry = cart[String(productId)];
-      const quantity = Math.max(0, Number(entry?.q ?? entry?.count ?? 0) || 0);
-      return [String(productId), quantity];
-    }));
-  } catch (_error) {
-    return Object.fromEntries(productIds.map((productId) => [String(productId), 0]));
-  }
 }
 
 async function inspectFairPriceSession(timeoutMs) {
@@ -610,19 +656,19 @@ async function addAndShowCart(items, options = {}) {
     let preparedCount = 0;
     let nativeStarted = false;
     sendProgress({ stage: "preloading", current: 0, total: items.length });
-    const readiness = items.map(async ({ product, quantity }, index) => {
+    const readiness = items.map(async ({ product }, index) => {
       const tab = tabs[index];
       const url = `https://www.fairprice.com.sg/product/${product.slug}`;
       try {
         await navigateTabAndWait(tab.id, url);
-        const [{ result: nativeButtonReady }] = await executeScriptWhenReady({
+        const [{ result: nativeControlReady }] = await executeScriptWhenReady({
           target: { tabId: tab.id },
-          func: waitForNativeAddButton,
+          func: waitForNativeCartControl,
           args: [4_000],
         });
-        return { product, quantity, tab, nativeButtonReady };
+        return { product, tab, nativeControlReady };
       } catch (error) {
-        return { product, quantity, tab, nativeButtonReady: false, prepareError: error };
+        return { product, tab, nativeControlReady: null, prepareError: error };
       } finally {
         preparedCount += 1;
         if (!nativeStarted) {
@@ -638,8 +684,8 @@ async function addAndShowCart(items, options = {}) {
     });
 
     // Attach consumers now so jobs retain their actual readiness order even
-    // when several pages become interactive while the cart snapshot is read.
-    // The gate prevents any click until that snapshot is safely captured.
+    // when several pages become interactive during the session preflight. The
+    // gate prevents any click until location and account mode are confirmed.
     let releaseNativeQueue;
     let abortNativeQueue = false;
     const nativeQueueGate = new Promise((resolve) => {
@@ -654,8 +700,8 @@ async function addAndShowCart(items, options = {}) {
       return enqueueNativeMutation(job, index);
     });
 
-    // Only the first usable FairPrice page gates the initial cart snapshot.
-    // Every other page continues preparing independently in the background.
+    // Only the first usable FairPrice page gates the session preflight. Every
+    // other page continues preparing independently in the background.
     let storageJob;
     try {
       storageJob = await Promise.any(readiness.map((ready) => ready.then((job) => {
@@ -734,16 +780,9 @@ async function addAndShowCart(items, options = {}) {
       total: items.length,
       productName: sessionInfo.isLoggedIn ? "Signed-in FairPrice cart" : "FairPrice guest cart",
     });
-    const productIds = items.map(({ product }) => String(product.id));
-    const [{ result: initialQuantities }] = await executeScriptWhenReady({
-      target: { tabId: storageTab.id },
-      func: readFairPriceCartQuantities,
-      args: [productIds],
-    });
-
-    // Accumulate targets so two ingredients selecting the same FairPrice SKU
-    // still produce the combined quantity instead of racing each other.
-    const targetByProductId = { ...initialQuantities };
+    // Targets are absolute recipe requirements, not quantities to add on top
+    // of an existing cart. Two ingredients selecting the same SKU are combined.
+    const targetByProductId = {};
     for (const { product, quantity } of items) {
       const productId = String(product.id);
       targetByProductId[productId] = (targetByProductId[productId] || 0)
@@ -764,7 +803,7 @@ async function addAndShowCart(items, options = {}) {
 
     function enqueueNativeMutation(job, index) {
       const queuedMutation = mutationChain.then(async () => {
-        const { product, quantity, tab, nativeButtonReady, prepareError } = job;
+        const { product, tab, nativeControlReady, prepareError } = job;
         let nativeResult = {
           verified: false,
           reason: prepareError?.message || "native add button unavailable",
@@ -779,12 +818,12 @@ async function addAndShowCart(items, options = {}) {
           productName: product.name,
         });
 
-        if (!prepareError && nativeButtonReady) {
+        if (!prepareError && nativeControlReady) {
           try {
             [{ result: nativeResult }] = await executeScriptWhenReady({
               target: { tabId: tab.id },
               func: tryNativeAdd,
-              args: [product.id, quantity, 2_500],
+              args: [product.id, targetByProductId[String(product.id)], 2_500],
             });
           } catch (error) {
             nativeResult = { verified: false, reason: error.message };

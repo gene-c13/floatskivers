@@ -30,9 +30,12 @@ background. During the location handoff, the address field is focused and
 highlighted with an animated callout anchored to it so the required action is
 immediately obvious.
 
-After the first usable page establishes the initial cart quantities, each page
+After the first usable page confirms the FairPrice session, each page
 joins a readiness-driven queue as soon as its native **Add to cart** button is
-available; a slow product no longer blocks faster ones. Cart clicks run one at
+available or its existing quantity stepper appears; a slow product no longer
+blocks faster ones. Products already at the recipe's requested pack count are
+accepted immediately, while lower quantities receive only the missing native
+increments. Cart clicks run one at
 a time with a brief settle window because concurrent FairPrice tabs can
 overwrite the same guest-cart snapshot. Once all attempts settle, the product
 tabs are destroyed and a single atomic reconciliation pass fills any missing
