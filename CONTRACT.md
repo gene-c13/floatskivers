@@ -69,7 +69,16 @@ Entries in `skipped` (vague-only ingredients like plain "salt to taste")
 are informational only — the agent should not search or add anything for
 these.
 
-## 2. `search_products(query)` — owned by the cart team
+## 2. `search_products(query, quantity=None, unit=None)` — owned by the cart team
+
+**Implemented** in `tools/cart.py`, as a real (not stubbed) FairPrice
+integration — it hits the same live search endpoint as
+`extension/popup.js`'s `searchFairPrice()`, and ranks results with a
+line-for-line port of that file's `scoreProduct()`/`chooseBestProduct()`,
+so an agent run and someone using the extension see candidates ranked by
+the same signal. `quantity`/`unit` are optional — pass them (from the
+shopping-list entry) to also rank by pack-size fit; omit for a
+name-match-only ranking.
 
 Called once per ingredient. Returns a short ranked list, not the whole
 catalog — 3-5 candidates is plenty; more just costs the agent more to read
@@ -77,15 +86,25 @@ catalog — 3-5 candidates is plenty; more just costs the agent more to read
 
 ```json
 [
-  {"product_id": "P123", "name": "FairPrice Chicken Breast", "brand": "FairPrice", "price": 5.90, "pack_size": "500g"},
-  {"product_id": "P456", "name": "Ayam Brand Chicken Breast", "brand": "Ayam Brand", "price": 7.20, "pack_size": "500g"}
+  {"product_id": "P123", "name": "FairPrice Chicken Breast", "brand": "FairPrice", "price": 5.90, "pack_size": "500g", "has_stock": true},
+  {"product_id": "P456", "name": "Ayam Brand Chicken Breast", "brand": "Ayam Brand", "price": 7.20, "pack_size": "400g", "has_stock": true}
 ]
 ```
 
 Return `[]` if nothing matches — the agent needs to be able to tell "no
-results" apart from "results, but none of them look right."
+results" apart from "results, but none of them look right." Out-of-stock
+candidates are already filtered out before ranking, same as
+`chooseBestProduct` does.
 
 ## 3. `add_to_cart(product_id, quantity)` — owned by the cart team
+
+**Still stubbed** in `tools/cart.py` — this is the one piece left. The real
+version (`extension/background.js`) only works from inside an actual
+browser tab: it injects a script into a live FairPrice page and writes
+straight to that page's own `localStorage` cart, which needs real
+FairPrice session/DOM context a headless script doesn't have. This needs
+either a real API route from the cart team, or the agent to somehow drive
+that same browser flow — not decided yet.
 
 Called once the agent has picked a specific product from `search_products`.
 

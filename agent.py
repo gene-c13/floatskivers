@@ -45,13 +45,21 @@ TOOL_SPECS = [
     {
         "name": "search_products",
         "description": (
-            "Search the FairPrice catalog for one grocery item. Returns a "
-            "short ranked list of candidate products with brand, price, and "
-            "pack size — pick the best match yourself before adding to cart."
+            "Search the real FairPrice catalog for one grocery item. Returns "
+            "a short ranked list of candidate products with brand, price, "
+            "and pack size — the ranking already favors closer name matches "
+            "and, when quantity/unit are given, better-fitting pack sizes, "
+            "but you still choose which one to add. Pass quantity and unit "
+            "from the shopping-list entry when you have them (e.g. 500, "
+            "'g') for a better ranking; omit them for vague items."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string"}},
+            "properties": {
+                "query": {"type": "string"},
+                "quantity": {"type": "number"},
+                "unit": {"type": "string"},
+            },
             "required": ["query"],
         },
     },
@@ -112,7 +120,9 @@ def run_tool(block: dict) -> dict:
 def build_goal(shopping_list: list, skipped: list) -> str:
     lines = [
         "Add these items to the FairPrice cart. For each one:",
-        "1. Call search_products with a short, product-searchable query.",
+        "1. Call search_products with a short, product-searchable query — "
+        "pass the item's quantity and unit too when the list below gives you "
+        "one, so results are ranked by pack-size fit as well as name match.",
         "2. Look at the candidates and pick the closest match — consider "
         "name, pack size vs. the quantity needed, and price.",
         "3. Call add_to_cart with that product's exact product_id.",
