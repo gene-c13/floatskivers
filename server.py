@@ -16,6 +16,7 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from agent import choose_product_for_item
 from recipe_parser import build_shopping_list, parse_recipe
 
 app = Flask(__name__)
@@ -58,6 +59,37 @@ def shopping_list():
         "skipped": skipped,
         "errors": errors,
     })
+
+
+@app.route("/pick-products", methods=["POST"])
+def pick_products():
+    """Given a shopping_list (from /shopping-list), let the Bedrock agent
+    search FairPrice and pick a product + quantity for each item — this is
+    what extension/popup.js now calls instead of doing its own
+    scoreProduct/chooseBestProduct ranking client-side. Requires AWS
+    credentials with Bedrock access in this process's environment, same as
+    running agent.py locally does.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get("shopping_list", [])
+    if not items:
+        return jsonify({"error": "no shopping_list provided"}), 400
+
+    picks = []
+    for item in items:
+        try:
+            picks.append(choose_product_for_item(item))
+        except Exception as exc:  # noqa: BLE001
+            picks.append({
+                "name": item.get("name"),
+                "product": None,
+                "quantity": 0,
+                "reason": str(exc),
+                "decided_by": "error",
+                "is_substitute": False,
+            })
+
+    return jsonify({"picks": picks})
 
 
 if __name__ == "__main__":

@@ -95,6 +95,19 @@ def score_product(query: str, quantity, unit, product: dict, index: int) -> floa
     return score
 
 
+def recommended_pack_count(quantity, unit, candidate: dict) -> int:
+    """Port of popup.js's recommendedPackCount(): how many packs of this
+    candidate are needed to cover the required quantity."""
+    if unit == "g" and quantity:
+        quantity = float(quantity)
+        pack_grams = _pack_amount_in_grams(candidate.get("pack_size"))
+        if pack_grams and quantity > 0:
+            return max(1, int(-(-quantity // pack_grams)))
+    if unit == "whole" and quantity:
+        return max(1, int(-(-float(quantity) // 1)))
+    return 1
+
+
 def choose_best_product(query: str, quantity, unit, raw_products: list):
     """Port of popup.js's chooseBestProduct(): the single best raw product,
     or None if every candidate is out of stock / unscoreable."""
@@ -154,6 +167,89 @@ def _to_candidate(product: dict) -> dict:
     }
 
 
+# Words after which FairPrice's search tends to choke on a trailing clause
+# that isn't really part of the product name — "olive oil for frying"
+# returns nothing, "olive oil" returns twenty results.
+_TRAILING_CLAUSE_WORDS = {"for", "to", "with", "using"}
+
+
+def _relaxed_search_queries(query: str):
+    """Yield `query`, then progressively broader variants, for when
+    FairPrice's search is too literal to match the ingredient's exact
+    wording. Every variant after the first means whatever it finds is a
+    substitute for what was actually asked, not a confirmed match — the
+    caller (agent.py's choose_product_for_item) treats that as always
+    needing the model's judgment and a clear "this is a substitute" flag,
+    never the fast deterministic path.
+    """
+    yield query
+
+    words = query.split()
+
+    # Drop a trailing "for X"/"to X" clause: "olive oil for frying" -> "olive oil".
+    for i, word in enumerate(words):
+        if i > 0 and word.lower() in _TRAILING_CLAUSE_WORDS:
+            trimmed = " ".join(words[:i])
+            if trimmed:
+                yield trimmed
+            break
+
+    # Then drop leading words one at a time: "fresh mozzarella" -> "mozzarella",
+    # "prepared tomato sauce" -> "tomato sauce".
+    for i in range(1, len(words)):
+        candidate = " ".join(words[i:])
+        if candidate:
+            yield candidate
+
+
+def search_and_rank_raw(query: str, quantity=None, unit=None, limit: int = 5):
+    """Search + rank, keeping the raw FairPrice objects around (not just
+    the simplified candidate shape). Needed wherever a pick has to be
+    handed to background.js's cart-adding, which requires the full raw
+    product (slug, clientItemId, storeSpecificData, ...) — the simplified
+    shape only carries what the model needs to reason about.
+
+    Tries `query` as-is first; if that turns up nothing (no results, or
+    every result out of stock), retries with progressively broader
+    variants (see _relaxed_search_queries) so an out-of-stock or
+    oddly-worded ingredient still surfaces a real substitute instead of a
+    flat "no matches" — ranking always scores against the *original*
+    query's wording, only the FairPrice search itself uses the broadened
+    one.
+
+    Returns (candidates, raw_by_id, scores, is_substitute): candidates is
+    CONTRACT.md's #2 shape, ranked best-first; raw_by_id maps each
+    candidate's product_id back to its raw FairPrice object; scores lines
+    up with candidates; is_substitute is True when a broadened query was
+    needed to find anything at all.
+    """
+    top_scored = []
+    is_substitute = False
+
+    for attempt_index, attempt_query in enumerate(_relaxed_search_queries(query)):
+        try:
+            raw_products = search_fairprice_raw(attempt_query)
+        except requests.RequestException as exc:
+            print(f"      [search failed: {exc}]")
+            return [], {}, [], False
+
+        scored = [
+            (score_product(query, quantity, unit, product, index), product)
+            for index, product in enumerate(raw_products)
+        ]
+        scored = [(s, p) for s, p in scored if s != float("-inf")]
+        if scored:
+            is_substitute = attempt_index > 0
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            top_scored = scored[:limit]
+            break
+
+    candidates = [_to_candidate(p) for _, p in top_scored]
+    raw_by_id = {c["product_id"]: p for c, (_, p) in zip(candidates, top_scored)}
+    scores = [s for s, _ in top_scored]
+    return candidates, raw_by_id, scores, is_substitute
+
+
 def search_products(query: str, quantity=None, unit=None) -> list:
     """Real FairPrice search, ranked with the same scoring the shipped
     extension uses. quantity/unit are optional — pass the shopping-list
@@ -162,20 +258,8 @@ def search_products(query: str, quantity=None, unit=None) -> list:
     alone.
     """
     print(f"      [tool] search_products({query!r}, quantity={quantity!r}, unit={unit!r})")
-    try:
-        raw_products = search_fairprice_raw(query)
-    except requests.RequestException as exc:
-        print(f"      [search_products failed: {exc}]")
-        return []
-
-    scored = [
-        (score_product(query, quantity, unit, product, index), product)
-        for index, product in enumerate(raw_products)
-    ]
-    scored = [(s, p) for s, p in scored if s != float("-inf")]
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-
-    return [_to_candidate(product) for _, product in scored[:5]]
+    candidates, _, _, _ = search_and_rank_raw(query, quantity, unit)
+    return candidates
 
 
 def add_to_cart(product_id: str, quantity: int) -> dict:

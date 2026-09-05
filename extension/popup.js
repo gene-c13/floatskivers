@@ -1,4 +1,5 @@
 const BACKEND_URL = "https://floatskivers.onrender.com/shopping-list";
+const PICK_PRODUCTS_URL = "https://floatskivers.onrender.com/pick-products";
 
 const recipeListEl = document.getElementById("recipeList");
 const statusEl = document.getElementById("status");
@@ -6,7 +7,6 @@ const resultEl = document.getElementById("result");
 const addAllButton = document.getElementById("addAll");
 const FAIRPRICE_ORIGIN = "https://www.fairprice.com.sg";
 const FAIRPRICE_SEARCH_URL = `${FAIRPRICE_ORIGIN}/search?query=`;
-const productSearchCache = new Map();
 let selectedMatches = [];
 
 function setStatus(text) {
@@ -110,118 +110,6 @@ function productUrl(product) {
   return `${FAIRPRICE_ORIGIN}/product/${product.slug}-${product.clientItemId}`;
 }
 
-function searchableWords(text) {
-  const ignored = new Set(["and", "of", "the", "a", "an", "fresh"]);
-  return String(text)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter((word) => word && !ignored.has(word));
-}
-
-function packAmountInGrams(displayUnit) {
-  const text = String(displayUnit).toLowerCase().replace(/\s+/g, "");
-  const multipack = text.match(/(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(kg|g)\b/);
-  if (multipack) {
-    const each = Number(multipack[2]) * (multipack[3] === "kg" ? 1000 : 1);
-    return Number(multipack[1]) * each;
-  }
-
-  const singlePack = text.match(/(\d+(?:\.\d+)?)(kg|g)\b/);
-  if (!singlePack) return null;
-  return Number(singlePack[1]) * (singlePack[2] === "kg" ? 1000 : 1);
-}
-
-function recommendedPackCount(item, product) {
-  if (item.needs_manual_reconciliation) return 1;
-
-  if (item.unit === "g") {
-    const packGrams = packAmountInGrams(productPackSize(product));
-    if (packGrams && Number(item.quantity) > 0) {
-      return Math.max(1, Math.ceil(Number(item.quantity) / packGrams));
-    }
-  }
-
-  if (item.unit === "whole" && Number(item.quantity) > 0) {
-    return Math.max(1, Math.ceil(Number(item.quantity)));
-  }
-
-  return 1;
-}
-
-function scoreProduct(item, product, index) {
-  if (product.has_stock === false) return -Infinity;
-
-  const query = searchableWords(item.name);
-  const productText = searchableWords(`${product.name} ${product.metaData?.["SAP Product Name"] || ""}`);
-  const productWords = new Set(productText);
-  const matchingWords = query.filter((word) => productWords.has(word)).length;
-  let score = matchingWords * 100 - Math.max(0, productText.length - query.length) * 0.5 - index;
-
-  const normalizedName = product.name.toLowerCase();
-  if (normalizedName.includes(item.name.toLowerCase())) score += 80;
-  if (product.brand?.name?.toLowerCase() === "fairprice") score += 3;
-
-  if (item.unit === "g" && Number(item.quantity) > 0) {
-    const packGrams = packAmountInGrams(productPackSize(product));
-    if (packGrams) {
-      const packs = Math.ceil(Number(item.quantity) / packGrams);
-      const excessRatio = ((packs * packGrams) - Number(item.quantity)) / Number(item.quantity);
-      score += 30 - Math.min(25, excessRatio * 10);
-    }
-  }
-
-  return score;
-}
-
-function chooseBestProduct(item, products) {
-  return products
-    .map((product, index) => ({ product, score: scoreProduct(item, product, index) }))
-    .filter(({ score }) => Number.isFinite(score))
-    .sort((left, right) => right.score - left.score)[0]?.product ?? null;
-}
-
-async function searchFairPrice(query) {
-  if (!productSearchCache.has(query)) {
-    productSearchCache.set(query, (async () => {
-      const response = await fetch(`${FAIRPRICE_SEARCH_URL}${encodeURIComponent(query)}`, {
-        // Preserve the shopper's selected store and delivery context when
-        // FairPrice supplies location-specific stock and prices.
-        credentials: "include",
-      });
-      if (!response.ok) throw new Error(`FairPrice search returned ${response.status}.`);
-
-      const html = await response.text();
-      const documentForSearch = new DOMParser().parseFromString(html, "text/html");
-      const nextData = documentForSearch.getElementById("__NEXT_DATA__")?.textContent;
-      if (!nextData) throw new Error("FairPrice did not return its search data.");
-
-      const payload = JSON.parse(nextData);
-      const layouts = payload.props?.pageProps?.data?.data?.page?.layouts ?? [];
-      const collection = layouts.find((layout) => layout.name === "ProductCollection");
-      return (collection?.value?.collection?.product ?? [])
-        .filter((product) => product?.id && product?.name && product?.slug && product?.clientItemId);
-    })());
-  }
-  return productSearchCache.get(query);
-}
-
-async function mapWithConcurrency(values, concurrency, worker) {
-  const results = new Array(values.length);
-  let nextIndex = 0;
-
-  async function run() {
-    while (nextIndex < values.length) {
-      const index = nextIndex++;
-      results[index] = await worker(values[index], index);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, run));
-  return results;
-}
-
 function createIngredientRow(item) {
   const row = document.createElement("div");
   row.className = "item";
@@ -239,7 +127,7 @@ function createIngredientRow(item) {
 
   const choice = document.createElement("span");
   choice.className = "searching";
-  choice.textContent = "Finding the best FairPrice match…";
+  choice.textContent = "Asking the agent for the best FairPrice match…";
 
   head.appendChild(name);
   head.appendChild(quantity);
@@ -249,14 +137,31 @@ function createIngredientRow(item) {
   return choice;
 }
 
-function showSelectedProduct(choiceEl, item, product, cartQuantity) {
+function showSelectedProduct(choiceEl, item, pick, onIncludeChange) {
   clearChildren(choiceEl);
-  choiceEl.className = "";
+  const product = pick.product;
 
   if (!product) {
     choiceEl.className = "flag";
-    choiceEl.textContent = "No in-stock FairPrice match found";
+    if (pick.decided_by === "error") {
+      choiceEl.textContent = `Could not get a pick: ${pick.reason}`;
+    } else if (pick.is_substitute) {
+      choiceEl.textContent = `No reasonable substitute found — ${pick.reason || "original out of stock"}`;
+    } else if (pick.decided_by === "search") {
+      choiceEl.textContent = pick.reason || "No FairPrice match found";
+    } else {
+      choiceEl.textContent = pick.reason ? `Skipped — ${pick.reason}` : "No in-stock FairPrice match found";
+    }
     return;
+  }
+
+  choiceEl.className = pick.is_substitute ? "substitute" : "";
+
+  if (pick.is_substitute) {
+    const badge = document.createElement("div");
+    badge.className = "substitute-badge";
+    badge.textContent = `"${item.name}" is out of stock — agent suggests this substitute:`;
+    choiceEl.appendChild(badge);
   }
 
   const link = document.createElement("a");
@@ -268,10 +173,31 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
 
   const meta = document.createElement("span");
   meta.className = "chosen-meta";
-  const packLabel = cartQuantity === 1 ? "1 pack" : `${cartQuantity} packs`;
+  const packLabel = pick.quantity === 1 ? "1 pack" : `${pick.quantity} packs`;
   meta.textContent = [productPackSize(product), productPrice(product), packLabel]
     .filter(Boolean)
     .join(" · ");
+
+  choiceEl.appendChild(link);
+  choiceEl.appendChild(meta);
+
+  if (pick.is_substitute) {
+    if (pick.reason) {
+      const reason = document.createElement("span");
+      reason.className = "chosen-meta";
+      reason.textContent = pick.reason;
+      choiceEl.appendChild(reason);
+    }
+
+    const optIn = document.createElement("label");
+    optIn.className = "substitute-opt-in";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.addEventListener("change", () => onIncludeChange(checkbox.checked));
+    optIn.appendChild(checkbox);
+    optIn.appendChild(document.createTextNode(" Add this substitute to the cart"));
+    choiceEl.appendChild(optIn);
+  }
 
   const searchLink = document.createElement("a");
   searchLink.className = "chosen-meta";
@@ -279,9 +205,6 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
   searchLink.target = "_blank";
   searchLink.rel = "noreferrer";
   searchLink.textContent = "See all search results";
-
-  choiceEl.appendChild(link);
-  choiceEl.appendChild(meta);
   choiceEl.appendChild(searchLink);
 }
 
@@ -290,7 +213,7 @@ async function renderResult(data) {
   selectedMatches = [];
   addAllButton.hidden = false;
   addAllButton.disabled = true;
-  addAllButton.textContent = "Finding FairPrice matches…";
+  addAllButton.textContent = "Asking the agent to pick products…";
 
   for (const err of data.errors || []) {
     const div = document.createElement("div");
@@ -300,35 +223,63 @@ async function renderResult(data) {
   }
 
   const items = data.shopping_list || [];
-  const rows = items.map((item) => ({ item, choice: createIngredientRow(item) }));
-  let completed = 0;
+  const rowsByName = new Map(items.map((item) => [item.name, createIngredientRow(item)]));
 
-  const matches = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
-    try {
-      const products = await searchFairPrice(item.name);
-      const product = chooseBestProduct(item, products);
-      const quantity = product ? recommendedPackCount(item, product) : 0;
-      showSelectedProduct(choice, item, product, quantity);
-      return product ? { item, product, quantity } : null;
-    } catch (error) {
-      choice.className = "flag";
-      choice.textContent = `FairPrice search failed: ${error.message}`;
-      return null;
-    } finally {
-      completed += 1;
-      setStatus(`Matched ${completed} of ${items.length} ingredients…`);
+  // One request covers the whole list: the agent decides every item's pick
+  // server-side (it needs to reach FairPrice and Bedrock, which this popup
+  // can't do directly), so there's no per-row progress to stream here —
+  // just a single wait, then all rows update at once.
+  let picks;
+  try {
+    const response = await fetch(PICK_PRODUCTS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shopping_list: items }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `backend returned ${response.status}`);
     }
-  });
+    ({ picks } = await response.json());
+  } catch (error) {
+    for (const choice of rowsByName.values()) {
+      choice.className = "flag";
+      choice.textContent = `Could not reach the picking agent: ${error.message}`;
+    }
+    setStatus(`Could not reach the picking agent: ${error.message}`);
+    return;
+  }
 
-  selectedMatches = matches.filter(Boolean);
-  const missing = items.length - selectedMatches.length;
-  addAllButton.disabled = selectedMatches.length === 0;
-  addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
-  setStatus(
-    missing
-      ? `Found ${selectedMatches.length} matches; ${missing} ingredient${missing === 1 ? "" : "s"} need review.`
-      : `Found FairPrice matches for all ${selectedMatches.length} ingredients.`,
-  );
+  // A normal match is included automatically; a substitute (the exact
+  // ingredient was out of stock, so the agent suggested something else)
+  // needs an explicit checkbox before it counts — see showSelectedProduct.
+  const includedByName = new Map();
+
+  function recomputeSelection() {
+    selectedMatches = picks
+      .filter((pick) => pick.product && (!pick.is_substitute || includedByName.get(pick.name)))
+      .map((pick) => ({ product: pick.product, quantity: pick.quantity }));
+
+    const missing = items.length - selectedMatches.length;
+    addAllButton.disabled = selectedMatches.length === 0;
+    addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
+    setStatus(
+      missing
+        ? `${selectedMatches.length} ready to add; ${missing} ingredient${missing === 1 ? "" : "s"} need review.`
+        : `Found FairPrice matches for all ${selectedMatches.length} ingredients.`,
+    );
+  }
+
+  for (const pick of picks) {
+    const choice = rowsByName.get(pick.name);
+    if (!choice) continue;
+    showSelectedProduct(choice, { name: pick.name }, pick, (checked) => {
+      includedByName.set(pick.name, checked);
+      recomputeSelection();
+    });
+  }
+
+  recomputeSelection();
 }
 
 addAllButton.addEventListener("click", async () => {
