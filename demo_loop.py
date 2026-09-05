@@ -12,6 +12,7 @@ pattern agent.py will reuse for real.
 """
 
 import json
+import os
 import time
 
 import boto3
@@ -22,7 +23,13 @@ load_dotenv()
 MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 MAX_STEPS = 5
 
-client = boto3.Session().client("bedrock-runtime", region_name="ap-southeast-1")
+# AWS_PROFILE names an `aws configure sso` profile in .env — SSO login
+# sessions last hours instead of the ~15-45 minutes of manually
+# copy-pasted access keys. profile_name=None (if AWS_PROFILE isn't set)
+# falls back to boto3's normal default credential chain.
+client = boto3.Session(profile_name=os.environ.get("AWS_PROFILE")).client(
+    "bedrock-runtime", region_name="ap-southeast-1"
+)
 
 
 # ---------------------------------------------------------------- tools
