@@ -1,11 +1,12 @@
 # Data contract — recipe team ↔ agent ↔ cart team
 
-The agent calls three tools. Everyone builds against these shapes
+The agent calls tools. Everyone builds against these shapes
 independently — no need to wait on each other.
 
 ## 1. `parse_recipe(url_or_text)` — owned by the recipe team
 
-Called once per recipe. Returns the whole thing, ingredients included.
+**Implemented** in `recipe_parser/parse_recipe.py`. Called once per recipe.
+Returns the whole thing, ingredients included.
 
 ```json
 {
@@ -21,10 +22,52 @@ Called once per recipe. Returns the whole thing, ingredients included.
 Notes:
 - `raw_text` is the original line from the recipe — kept in case the agent
   needs more context than the parsed fields give it.
-- Open question for the recipe team: what happens with vague lines like
-  "salt to taste"? Either return them with `quantity: null` and let the
-  agent's instructions decide to skip pantry staples, or drop them
-  entirely before returning. Pick one and tell the agent side which.
+- Resolved: vague lines like "salt to taste" come back with
+  `quantity: null, unit: null` rather than being dropped — the "to taste"
+  suffix is stripped from `name`. Whether to act on those at all is handled
+  downstream, see `build_shopping_list` below.
+
+## 1b. `build_shopping_list(recipes)` — owned by the recipe team
+
+**Implemented** in `recipe_parser/shopping_list.py`. Not in the original
+contract — added once real recipes showed unit mismatches across the same
+ingredient (e.g. "3 cloves garlic" in one recipe, "1 tsp minced garlic" in
+another) that the agent shouldn't have to reconcile itself. Takes a list of
+`parse_recipe()` outputs (i.e. call `parse_recipe` once per recipe URL
+first, then pass all of them in together) and merges by ingredient name,
+converting to grams where it can.
+
+Returns `(shopping_list, skipped)`:
+
+```json
+[
+  {"name": "garlic", "quantity": 9.0, "unit": "g", "sources": ["Chicken Stir Fry", "Garlic Rice"]},
+  {"name": "chili", "quantity": 1, "unit": "whole", "sources": ["Chicken Stir Fry"]},
+  {"name": "beef", "quantity": null, "unit": null, "needs_manual_reconciliation": true,
+   "entries": [{"quantity": 1, "unit": "lb", "source": "Beef Stew"}, {"quantity": 200, "unit": "ml", "source": "Beef Broth"}]}
+]
+```
+
+```json
+[
+  {"name": "salt", "reason": "only vague/to-taste mentions, no quantity found in any recipe", "sources": ["Chicken Stir Fry"]}
+]
+```
+
+**Resolved:** `agent.py` calls `parse_recipe` per URL, then
+`build_shopping_list` once over all of them, *before* the tool loop starts.
+The model never sees raw per-recipe ingredients — only the merged
+`shopping_list`, one entry at a time, via `search_products`/`add_to_cart`.
+
+**Resolved:** for a `needs_manual_reconciliation: true` entry, the agent
+calls `search_products` on `name` alone (no quantity/unit to work with) and
+lets the model pick a reasonable pack size from whatever candidates come
+back, same as any other item. Kept fully automatic for the demo — no
+separate "needs review" path in the agent loop.
+
+Entries in `skipped` (vague-only ingredients like plain "salt to taste")
+are informational only — the agent should not search or add anything for
+these.
 
 ## 2. `search_products(query)` — owned by the cart team
 
