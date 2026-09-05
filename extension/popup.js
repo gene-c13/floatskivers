@@ -1,4 +1,5 @@
 const BACKEND_URL = "https://floatskivers.onrender.com/shopping-list";
+const CART_PROGRESS_KEY = "fairPriceCartProgress";
 
 const recipeListEl = document.getElementById("recipeList");
 const statusEl = document.getElementById("status");
@@ -19,6 +20,7 @@ const SEARCH_QUERY_OVERRIDES = new Map([
   ["baking potatoes", "potato"],
 ]);
 let selectedMatches = [];
+let latestProgressUpdatedAt = 0;
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "FAIRPRICE_ADD_PROGRESS") return;
@@ -26,11 +28,15 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 function updateCartProgress(message) {
+  const updatedAt = Number(message.updatedAt || 0);
+  if (updatedAt && updatedAt < latestProgressUpdatedAt) return;
+  if (updatedAt) latestProgressUpdatedAt = updatedAt;
   const total = Math.max(1, Number(message.total) || selectedMatches.length || 1);
   const current = Math.max(0, Number(message.current) || 0);
   const completed = Math.max(0, Number(message.completed) || 0);
   let percentage;
   if (message.stage === "finished") percentage = 100;
+  else if (message.stage === "failed") percentage = Math.max(8, Math.round((completed / total) * 80));
   else if (message.stage === "preloading") percentage = 0;
   else if (message.stage === "preloaded") percentage = Math.round((current / total) * 28);
   else if (["checking_session", "guest_session", "signed_in_session", "location_required"].includes(message.stage)) percentage = 28;
@@ -41,7 +47,7 @@ function updateCartProgress(message) {
   else if (message.stage === "complete") percentage = 82 + Math.round((current / total) * 18);
   else percentage = 28;
   const stageLabels = {
-    preloading: "Opening all product pages in parallel…",
+    preloading: "Starting the FairPrice product worker pool…",
     preloaded: `Prepared ${current} of ${total} product pages…`,
     checking_session: "Checking delivery location and account session…",
     guest_session: "Guest session ready — native cart with safe fallback enabled",
@@ -49,7 +55,7 @@ function updateCartProgress(message) {
     location_required: "Select a delivery location on FairPrice; adding will resume automatically",
     opening: "Opening product page in the background…",
     native: `Adding ${message.productName || "product"} to the cart…`,
-    streaming_native: "Product pages are loading in parallel…",
+    streaming_native: "Loading up to four product pages at a time…",
     native_result: message.nativeVerified
       ? `Added ${completed} of ${total}; taking the next ready product…`
       : `Checked ${completed} of ${total}; safe fallback is queued…`,
@@ -61,6 +67,7 @@ function updateCartProgress(message) {
         ? "Added with the cart fallback"
         : "Could not add this product",
     finished: "Finished — opening your FairPrice cart…",
+    failed: message.reason || "The background cart run stopped unexpectedly.",
   };
 
   cartProgressEl.classList.add("visible");
@@ -68,8 +75,10 @@ function updateCartProgress(message) {
     ? completed
     : current;
   progressCountEl.textContent = message.stage === "finished" ? `${total} / ${total}` : `${displayCurrent} / ${total}`;
-  progressProductEl.textContent = message.productName
-    || (message.stage === "finished" ? "All products processed" : "Preparing product pages…");
+  progressProductEl.textContent = message.stage === "native_result" && completed < total
+    ? `${completed} of ${total} products processed`
+    : message.productName
+      || (message.stage === "finished" ? "All products processed" : "Preparing product pages…");
   progressBarEl.style.width = `${percentage}%`;
   progressStageEl.textContent = stageLabels[message.stage] || "Working in the background…";
 
@@ -78,7 +87,9 @@ function updateCartProgress(message) {
     ? Array.from(resultEl.querySelectorAll(".item")).find((row) => row.dataset.queueIndex === String(current))
     : null;
   if (activeRow) {
-    activeRow.dataset.state = message.stage === "complete" ? message.method : "active";
+    activeRow.dataset.state = message.stage === "complete"
+      ? message.method
+      : message.stage === "native_result" && message.nativeVerified ? "native" : "active";
     if (message.stage === "complete") {
       const meta = activeRow.querySelector(".chosen-meta");
       if (meta) {
@@ -87,6 +98,29 @@ function updateCartProgress(message) {
       }
     }
     activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+async function restoreCartProgress() {
+  const stored = await chrome.storage.session.get(CART_PROGRESS_KEY);
+  const progress = stored[CART_PROGRESS_KEY];
+  if (!progress) return;
+
+  const isFresh = Date.now() - Number(progress.updatedAt || 0) < 30 * 60 * 1_000;
+  if (!isFresh) {
+    await chrome.storage.session.remove(CART_PROGRESS_KEY);
+    return;
+  }
+
+  updateCartProgress(progress);
+  if (progress.stage === "finished") {
+    setStatus("The FairPrice cart run finished successfully.");
+  } else if (progress.stage === "failed") {
+    setStatus(`Cart run stopped: ${progress.reason || "FairPrice did not respond."}`);
+  } else if (["location_required", "waiting_for_location"].includes(progress.stage)) {
+    setStatus("Waiting for a delivery location on the opened FairPrice tab.");
+  } else {
+    setStatus("Your FairPrice cart is still being prepared in the background.");
   }
 }
 
@@ -511,6 +545,7 @@ document.getElementById("buildList").addEventListener("click", async () => {
   }
 
   setStatus("Building shopping list...");
+  await chrome.storage.session.remove(CART_PROGRESS_KEY);
   clearChildren(resultEl);
   selectedMatches = [];
   resultsPanelEl.hidden = true;
@@ -538,3 +573,4 @@ document.getElementById("buildList").addEventListener("click", async () => {
 });
 
 renderRecipeList();
+restoreCartProgress();

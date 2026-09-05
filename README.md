@@ -30,6 +30,27 @@ background. During the location handoff, the address field is focused and
 highlighted with an animated callout anchored to it so the required action is
 immediately obvious.
 
+Native verification races the cart-storage update against FairPrice's visible
+Add-button transition, so location-specific fresh-produce variants do not pay a
+multi-second storage timeout. Cart matching also recognises FairPrice's internal
+ID, client item ID, and canonical slug when a selected store substitutes the
+underlying fresh-product record.
+
+Per-product work uses bounded budgets rather than stacked long waits: product
+navigation is capped at six seconds, control discovery at 1.8 seconds, and a
+single-pack native action at roughly 2.2 seconds. An unresponsive product falls
+through to the appropriate recovery path without holding the remaining queue
+for around twenty seconds.
+
+For larger shopping lists, at most four reusable FairPrice product tabs are
+kept alive. Each worker preloads its next product while a single mutation queue
+updates the shared cart, avoiding the CPU, memory, and background-timer
+throttling caused by twelve or more simultaneous FairPrice applications.
+
+The latest cart-run state is stored in extension session storage. Closing and
+reopening the extension popup restores the current product, completed count,
+stage, and progress bar without restarting the operation.
+
 After the first usable page confirms the FairPrice session, each page
 joins a readiness-driven queue as soon as its native **Add to cart** button is
 available or its existing quantity stepper appears; a slow product no longer

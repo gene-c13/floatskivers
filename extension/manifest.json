@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Recipe to FairPrice Cart",
-  "version": "0.12.0",
+  "version": "0.15.0",
   "description": "Collect recipes from AllRecipes and build a FairPrice shopping list.",
   "permissions": ["activeTab", "storage", "tabs", "scripting"],
   "host_permissions": [
