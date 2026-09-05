@@ -332,6 +332,23 @@ function chooseBestProduct(item, products) {
     .sort((left, right) => right.score - left.score)[0]?.product ?? null;
 }
 
+async function chooseBestProductWithAI(item, products, recipeName) {
+  const fallback = chooseBestProduct(item, products);
+  if (!fallback) return { product: null, reason: "No suitable FairPrice product found.", source: "fallback" };
+  try {
+    const response = await fetch(BACKEND_URL.replace(/\/shopping-list$/, "/select-product"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipe_name: recipeName, ingredient: item, products, fallback_product_id: fallback.id }),
+    });
+    if (!response.ok) throw new Error(`AI selector returned ${response.status}`);
+    const choice = await response.json();
+    const product = products.find((candidate) => String(candidate.id) === String(choice.selected_product_id));
+    return { product: product || fallback, reason: product ? choice.reason : "AI selection was invalid; deterministic match used.", source: product ? choice.source : "fallback" };
+  } catch (_error) {
+    return { product: fallback, reason: "AI unavailable; deterministic match used.", source: "fallback" };
+  }
+}
+
 async function searchFairPrice(query) {
   if (!productSearchCache.has(query)) {
     productSearchCache.set(query, (async () => {
@@ -399,7 +416,7 @@ function createIngredientRow(item) {
   return choice;
 }
 
-function showSelectedProduct(choiceEl, item, product, cartQuantity) {
+function showSelectedProduct(choiceEl, item, product, cartQuantity, reason, source) {
   clearChildren(choiceEl);
   choiceEl.className = "";
 
@@ -432,6 +449,10 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity) {
   searchLink.textContent = "See all search results";
 
   choiceEl.appendChild(link);
+  const explanation = document.createElement("span");
+  explanation.className = "chosen-meta";
+  explanation.textContent = `${source === "ai" ? "AI selected: " : "Match: "}${reason || "Deterministic match selected."}`;
+  choiceEl.appendChild(explanation);
   choiceEl.appendChild(meta);
   choiceEl.appendChild(searchLink);
   choiceEl.closest(".item").dataset.productId = String(product.id);
@@ -461,9 +482,10 @@ async function renderResult(data) {
   const matches = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
     try {
       const products = await searchFairPrice(fairPriceSearchQuery(item.name));
-      const product = chooseBestProduct(item, products);
+      const aiChoice = await chooseBestProductWithAI(item, products, item.sources?.[0] || "Recipe");
+      const product = aiChoice.product;
       const quantity = product ? recommendedPackCount(item, product) : 0;
-      showSelectedProduct(choice, item, product, quantity);
+      showSelectedProduct(choice, item, product, quantity, aiChoice.reason, aiChoice.source);
       return product ? { item, product, quantity, row: choice.closest(".item") } : null;
     } catch (error) {
       choice.className = "flag";

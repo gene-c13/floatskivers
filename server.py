@@ -17,9 +17,24 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from recipe_parser import build_shopping_list, parse_recipe
+from ai_product_selector import select_product
 
 app = Flask(__name__)
 CORS(app)
+
+
+@app.route("/select-product", methods=["POST"])
+def select_product_route():
+    data = request.get_json(force=True, silent=True) or {}
+    products = data.get("products", [])
+    if not products:
+        return jsonify({"selected_product_id": None, "reason": "No products found.", "confidence": 0}), 200
+    # The frontend sends the existing deterministic winner as a safe fallback.
+    fallback_id = str(data.get("fallback_product_id", ""))
+    fallback = lambda candidates: next((p for p in candidates if str(p.get("id")) == fallback_id), candidates[0])
+    result = select_product(data, products, fallback)
+    product = result["product"]
+    return jsonify({"selected_product_id": str(product["id"]), "reason": result["reason"], "confidence": result["confidence"], "source": result["source"]})
 
 
 @app.route("/health", methods=["GET"])
