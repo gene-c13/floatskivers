@@ -6,6 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY recipe_parser/ recipe_parser/
+COPY tools/ tools/
+COPY agent.py .
 COPY server.py .
 
 ENV PORT=8080
