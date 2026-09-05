@@ -14,6 +14,22 @@ use a guest-cart reconciliation fallback where necessary, and open the cart
 for final review.
 
 The extension opens every matched product page in background tabs at once.
+Before changing the cart, it checks FairPrice's own delivery and account
+session. If no address or postal code has been selected, it stops without
+touching the cart and opens FairPrice's native location selector. The pending
+products are stored temporarily in extension session storage, and adding resumes automatically after the
+shopper chooses a location; the extension neither reads nor stores the postal
+code itself. This prevents FairPrice from rehydrating an uninitialised session
+and clearing the generated cart.
+
+Because Chrome closes the extension popup when the FairPrice tab becomes
+active, a floating Recipe Cart progress panel is injected into that tab. It
+shows the location handoff, the product currently being added, verification
+progress, fallback status, and cart completion while work continues in the
+background. During the location handoff, the address field is focused and
+highlighted with an animated callout anchored to it so the required action is
+immediately obvious.
+
 After the first usable page establishes the initial cart quantities, each page
 joins a readiness-driven queue as soon as its native **Add to cart** button is
 available; a slow product no longer blocks faster ones. Cart clicks run one at
@@ -21,6 +37,11 @@ a time with a brief settle window because concurrent FairPrice tabs can
 overwrite the same guest-cart snapshot. Once all attempts settle, the product
 tabs are destroyed and a single atomic reconciliation pass fills any missing
 product, enforces every requested pack count, and opens the cart.
+
+Both account modes use FairPrice's native **Add to cart** controls. Confirmed
+guest sessions may use the local-storage reconciliation fallback after native
+attempts finish. Signed-in sessions never receive synthetic guest-cart writes;
+their account-backed FairPrice cart remains the sole source of truth.
 
 Weight-based recipe quantities are converted to enough retail packs to cover
 the requested weight. Bare counts, whole items, and cans also preserve

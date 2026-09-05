@@ -33,6 +33,7 @@ function updateCartProgress(message) {
   if (message.stage === "finished") percentage = 100;
   else if (message.stage === "preloading") percentage = 0;
   else if (message.stage === "preloaded") percentage = Math.round((current / total) * 28);
+  else if (["checking_session", "guest_session", "signed_in_session", "location_required"].includes(message.stage)) percentage = 28;
   else if (message.stage === "streaming_native") percentage = 30;
   else if (message.stage === "native") percentage = 30 + Math.round((completed / total) * 48);
   else if (message.stage === "native_result") percentage = 30 + Math.round((completed / total) * 48);
@@ -42,6 +43,10 @@ function updateCartProgress(message) {
   const stageLabels = {
     preloading: "Opening all product pages in parallel…",
     preloaded: `Prepared ${current} of ${total} product pages…`,
+    checking_session: "Checking delivery location and account session…",
+    guest_session: "Guest session ready — native cart with safe fallback enabled",
+    signed_in_session: "Signed-in session ready — using FairPrice’s native account cart",
+    location_required: "Select a delivery location on FairPrice; adding will resume automatically",
     opening: "Opening product page in the background…",
     native: `Adding ${message.productName || "product"} to the cart…`,
     streaming_native: "Product pages are loading in parallel…",
@@ -469,6 +474,15 @@ addAllButton.addEventListener("click", async () => {
       items: selectedMatches.map(({ product, quantity }) => ({ product, quantity })),
     });
     if (!response?.ok) throw new Error(response?.error || "FairPrice could not add the ingredients.");
+    if (response.result?.status === "location_required") {
+      addAllButton.disabled = false;
+      addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
+      progressProductEl.textContent = "Delivery location required";
+      progressStageEl.textContent = "Choose your location on FairPrice; adding will resume automatically.";
+      setStatus("FairPrice needs a delivery location before it can keep cart items. Choose it in the opened FairPrice tab and the cart will continue automatically.");
+      return;
+    }
+    if (!Array.isArray(response.result)) throw new Error("FairPrice returned an unexpected cart result.");
     const added = response.result.filter((item) => item.method !== "failed");
     const native = added.filter((item) => item.method === "native").length;
     const fallback = added.filter((item) => item.method === "localStorage").length;
