@@ -351,6 +351,29 @@ async function chooseBestProductWithAI(item, products, recipeName) {
   }
 }
 
+function alternativeSearchTerms(name) {
+  const words = String(name).trim().split(/\s+/);
+  if (words.length < 2) return [];
+  const qualifiers = new Set(["china", "chinese", "fresh", "organic", "premium", "brand", "style", "type", "whole", "light", "dark", "buffalo", "dutch-process"]);
+  const core = words.filter((word) => !qualifiers.has(word.toLowerCase())).join(" ").trim();
+  if (!core || core.toLowerCase() === name.trim().toLowerCase()) return [];
+  return [core, /cheese|mozzarella|cheddar|parmesan/i.test(core) && !/cheese/i.test(core) ? `${core} cheese` : null].filter(Boolean).slice(0, 2);
+}
+
+async function findProductWithAlternatives(item, exactProducts, recipeName) {
+  const exact = await chooseBestProductWithAI(item, exactProducts, recipeName);
+  if (exact.product || exact.status === "matched") return exact;
+  let last = exact;
+  for (const term of alternativeSearchTerms(item.name)) {
+    const products = await searchFairPrice(term);
+    if (!products.length) { last = { product: null, status: "not_found", reason: "Not found on FairPrice", source: "search" }; continue; }
+    const choice = await chooseBestProductWithAI(item, products, recipeName);
+    if (choice.product && choice.source === "ai") return { ...choice, status: "alternative_matched", originalIngredient: item.name, alternativeSearchTerm: term, reason: `Exact ingredient unavailable; ${choice.reason || "a suitable alternative was found"}.` };
+    last = choice;
+  }
+  return last;
+}
+
 async function searchFairPrice(query) {
   if (!productSearchCache.has(query)) {
     productSearchCache.set(query, (async () => {
@@ -484,7 +507,7 @@ async function renderResult(data) {
   const matches = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
     try {
       const products = await searchFairPrice(fairPriceSearchQuery(item.name));
-      const aiChoice = await chooseBestProductWithAI(item, products, item.sources?.[0] || "Recipe");
+      const aiChoice = await findProductWithAlternatives(item, products, item.sources?.[0] || "Recipe");
       const product = aiChoice.product;
       const quantity = product ? recommendedPackCount(item, product) : 0;
       showSelectedProduct(choice, item, product, quantity, aiChoice.reason, aiChoice.source);
@@ -494,7 +517,7 @@ async function renderResult(data) {
         choice.textContent = `❌ ${reason}`;
         return { unavailable: true, item, reason, row: choice.closest(".item") };
       }
-      return { item, product, quantity, row: choice.closest(".item") };
+      return { item, product, quantity, row: choice.closest(".item"), alternative: aiChoice.status === "alternative_matched", alternativeSearchTerm: aiChoice.alternativeSearchTerm };
     } catch (error) {
       choice.className = "flag";
       choice.textContent = `FairPrice search failed: ${error.message}`;

@@ -31,7 +31,7 @@ def select_product(payload, products, fallback_selector, model_call=None):
         confidence = float(answer.get("confidence", 0.0))
         if selected_id not in allowed or not 0.5 <= confidence <= 1:
             raise ValueError("AI returned an invalid product selection")
-        return {"product": allowed[selected_id], "status": "matched", "reason": str(answer.get("reason", "AI selected the best recipe match.")), "confidence": confidence, "source": "ai"}
+        return {"product": allowed[selected_id], "status": status if status in {"matched", "alternative_matched"} else "matched", "original_ingredient": answer.get("original_ingredient"), "alternative_search_term": answer.get("alternative_search_term"), "reason": str(answer.get("reason", "AI selected the best recipe match.")), "confidence": confidence, "source": "ai"}
     except Exception:
         product = fallback_selector(available)
         return {**_fallback(available, fallback_selector), "product": product, "status": "matched"}
@@ -39,7 +39,7 @@ def select_product(payload, products, fallback_selector, model_call=None):
 
 def _prompt(payload, products):
     candidates = [{"product_id": p.get("id"), "name": p.get("name"), "description": p.get("description") or p.get("metaData", {}).get("SAP Product Name"), "price": p.get("final_price") or p.get("mrp"), "size": p.get("metaData", {}).get("DisplayUnit")} for p in products]
-    return "Choose the best grocery product for this recipe ingredient. Return JSON only: status='matched' or 'no_suitable_match', selected_product_id (null for no_suitable_match), reason, confidence (0 to 1). Choose only an available supplied product ID; never invent products or IDs.\n" + json.dumps({"recipe_name": payload.get("recipe_name"), "ingredient": payload.get("ingredient"), "products": candidates}, ensure_ascii=False)
+    return "Choose the best grocery product for this recipe ingredient. Return JSON only: status='matched', 'alternative_matched', or 'no_suitable_match'; selected_product_id (null for no_suitable_match); reason; confidence (0 to 1). Choose only an available supplied product ID; never invent products or IDs.\n" + json.dumps({"recipe_name": payload.get("recipe_name"), "ingredient": payload.get("ingredient"), "products": candidates}, ensure_ascii=False)
 
 
 def _bedrock_call(prompt):
