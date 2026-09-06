@@ -339,6 +339,48 @@ function rankFairPriceMatches(item, products) {
     .slice(0, 8);
 }
 
+async function chooseBestProductWithAI(item, products, recipeName) {
+  const fallback = chooseBestProduct(item, products);
+  if (!products.length) return { product: null, status: "not_found", reason: "Not found on FairPrice", source: "search" };
+  if (!fallback) return { product: null, status: "out_of_stock", reason: "Out of stock", source: "search" };
+  try {
+    const response = await fetch(BACKEND_URL.replace(/\/shopping-list$/, "/select-product"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipe_name: recipeName, ingredient: item, products, fallback_product_id: fallback.id }),
+    });
+    if (!response.ok) throw new Error(`AI selector returned ${response.status}`);
+    const choice = await response.json();
+    const product = products.find((candidate) => String(candidate.id) === String(choice.selected_product_id));
+    if (choice.status === "no_suitable_match") return { product: null, status: "no_suitable_match", reason: "No suitable match found", source: "ai" };
+    return { product: product || fallback, status: "matched", reason: product ? choice.reason : "AI selection was invalid; deterministic match used.", source: product ? choice.source : "fallback" };
+  } catch (_error) {
+    return { product: fallback, status: "matched", reason: "AI unavailable; deterministic match used.", source: "fallback" };
+  }
+}
+
+function alternativeSearchTerms(name) {
+  const words = String(name).trim().split(/\s+/);
+  if (words.length < 2) return [];
+  const qualifiers = new Set(["china", "chinese", "fresh", "organic", "premium", "brand", "style", "type", "whole", "light", "dark", "buffalo", "dutch-process"]);
+  const core = words.filter((word) => !qualifiers.has(word.toLowerCase())).join(" ").trim();
+  if (!core || core.toLowerCase() === name.trim().toLowerCase()) return [];
+  return [core, /cheese|mozzarella|cheddar|parmesan/i.test(core) && !/cheese/i.test(core) ? `${core} cheese` : null].filter(Boolean).slice(0, 2);
+}
+
+async function findProductWithAlternatives(item, exactProducts, recipeName) {
+  const exact = await chooseBestProductWithAI(item, exactProducts, recipeName);
+  if (exact.product || exact.status === "matched") return exact;
+  let last = exact;
+  for (const term of alternativeSearchTerms(item.name)) {
+    const products = await searchFairPrice(term);
+    if (!products.length) { last = { product: null, status: "not_found", reason: "Not found on FairPrice", source: "search" }; continue; }
+    const choice = await chooseBestProductWithAI(item, products, recipeName);
+    if (choice.product && choice.source === "ai") return { ...choice, status: "alternative_matched", originalIngredient: item.name, alternativeSearchTerm: term, reason: `Exact ingredient unavailable; ${choice.reason || "a suitable alternative was found"}.` };
+    last = choice;
+  }
+  return last;
+}
+
 async function searchFairPrice(query) {
   if (!productSearchCache.has(query)) {
     productSearchCache.set(query, (async () => {
@@ -484,6 +526,13 @@ function showSelectedProduct(choiceEl, item, pick, onIncludeChange) {
 
   choiceEl.appendChild(link);
   choiceEl.appendChild(meta);
+
+  if (pick.reason && !pick.is_substitute) {
+    const explanation = document.createElement("span");
+    explanation.className = "chosen-meta";
+    explanation.textContent = `${pick.decided_by === "agent" ? "AI selected: " : "Match: "}${pick.reason}`;
+    choiceEl.appendChild(explanation);
+  }
 
   if (pick.is_substitute) {
     if (pick.reason) {
