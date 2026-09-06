@@ -16,6 +16,7 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from agent import choose_product_for_item
 from recipe_parser import build_shopping_list, parse_recipe
 from ai_product_selector import select_product
 
@@ -73,6 +74,42 @@ def shopping_list():
         "skipped": skipped,
         "errors": errors,
     })
+
+
+@app.route("/pick-products", methods=["POST"])
+def pick_products():
+    """Given items already searched and ranked by extension/popup.js
+    (scoreProduct/rankFairPriceMatches — the cart team's own logic, not
+    reimplemented here), let the Bedrock agent make the final call on each
+    one: which candidate to add, and how many. popup.js still does the
+    actual FairPrice search itself; this endpoint only ever decides.
+
+    Expects {"items": [{"name", "quantity", "unit",
+    "needs_manual_reconciliation", "is_substitute", "candidates": [
+    {"product": <raw FairPrice product>, "score", "recommended_quantity"},
+    ...]}, ...]}. Requires AWS credentials with Bedrock access in this
+    process's environment, same as running agent.py locally does.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "no items provided"}), 400
+
+    picks = []
+    for item in items:
+        try:
+            picks.append(choose_product_for_item(item))
+        except Exception as exc:  # noqa: BLE001
+            picks.append({
+                "name": item.get("name"),
+                "product": None,
+                "quantity": 0,
+                "reason": str(exc),
+                "decided_by": "error",
+                "is_substitute": False,
+            })
+
+    return jsonify({"picks": picks})
 
 
 if __name__ == "__main__":

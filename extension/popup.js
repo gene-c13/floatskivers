@@ -1,4 +1,5 @@
 const BACKEND_URL = "https://floatskivers.onrender.com/shopping-list";
+const PICK_PRODUCTS_URL = "https://floatskivers.onrender.com/pick-products";
 const CART_PROGRESS_KEY = "fairPriceCartProgress";
 
 const recipeListEl = document.getElementById("recipeList");
@@ -325,11 +326,17 @@ function scoreProduct(item, product, index) {
   return score;
 }
 
-function chooseBestProduct(item, products) {
+// Same idea as scoreProduct/chooseBestProduct used to be, except it keeps
+// the ranked shortlist instead of collapsing to a single pick — the agent
+// needs to see the options to reason about them, not just be told the
+// answer. This is the only thing that changed: search and ranking still
+// live here, in JS, same as always.
+function rankFairPriceMatches(item, products) {
   return products
     .map((product, index) => ({ product, score: scoreProduct(item, product, index) }))
     .filter(({ score }) => Number.isFinite(score))
-    .sort((left, right) => right.score - left.score)[0]?.product ?? null;
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 8);
 }
 
 async function chooseBestProductWithAI(item, products, recipeName) {
@@ -399,6 +406,40 @@ async function searchFairPrice(query) {
   return productSearchCache.get(query);
 }
 
+// Broadens the search when the exact ingredient has nothing in stock —
+// FairPrice's own search is literal enough that a trailing clause ("olive
+// oil for frying") or a leading descriptor ("fresh mozzarella") can return
+// nothing, even though a real substitute exists under a simpler query.
+// Whatever a broadened query finds is a substitute, not a confirmed match,
+// which is why rankWithFallback reports that back to the caller.
+function* relaxedQueries(query) {
+  yield query;
+
+  const words = query.split(" ");
+  const clauseWords = new Set(["for", "to", "with", "using"]);
+  for (let i = 1; i < words.length; i++) {
+    if (clauseWords.has(words[i].toLowerCase())) {
+      yield words.slice(0, i).join(" ");
+      break;
+    }
+  }
+  for (let i = 1; i < words.length; i++) {
+    yield words.slice(i).join(" ");
+  }
+}
+
+async function rankWithFallback(item) {
+  const baseQuery = fairPriceSearchQuery(item.name);
+  let attemptIndex = 0;
+  for (const query of relaxedQueries(baseQuery)) {
+    const products = await searchFairPrice(query);
+    const ranked = rankFairPriceMatches(item, products);
+    if (ranked.length > 0) return { ranked, isSubstitute: attemptIndex > 0 };
+    attemptIndex += 1;
+  }
+  return { ranked: [], isSubstitute: false };
+}
+
 async function mapWithConcurrency(values, concurrency, worker) {
   const results = new Array(values.length);
   let nextIndex = 0;
@@ -431,7 +472,7 @@ function createIngredientRow(item) {
 
   const choice = document.createElement("span");
   choice.className = "searching";
-  choice.textContent = "Finding the best FairPrice match…";
+  choice.textContent = "Searching FairPrice…";
 
   head.appendChild(name);
   head.appendChild(quantity);
@@ -441,14 +482,31 @@ function createIngredientRow(item) {
   return choice;
 }
 
-function showSelectedProduct(choiceEl, item, product, cartQuantity, reason, source) {
+function showSelectedProduct(choiceEl, item, pick, onIncludeChange) {
   clearChildren(choiceEl);
-  choiceEl.className = "";
+  const product = pick.product;
 
   if (!product) {
     choiceEl.className = "flag";
-    choiceEl.textContent = "No in-stock FairPrice match found";
+    if (pick.decided_by === "error") {
+      choiceEl.textContent = `Could not get a pick: ${pick.reason}`;
+    } else if (pick.is_substitute) {
+      choiceEl.textContent = `No reasonable substitute found — ${pick.reason || "original out of stock"}`;
+    } else if (pick.decided_by === "search") {
+      choiceEl.textContent = pick.reason || "No FairPrice match found";
+    } else {
+      choiceEl.textContent = pick.reason ? `Skipped — ${pick.reason}` : "No in-stock FairPrice match found";
+    }
     return;
+  }
+
+  choiceEl.className = pick.is_substitute ? "substitute" : "";
+
+  if (pick.is_substitute) {
+    const badge = document.createElement("div");
+    badge.className = "substitute-badge";
+    badge.textContent = `"${item.name}" is out of stock — agent suggests this substitute:`;
+    choiceEl.appendChild(badge);
   }
 
   const link = document.createElement("a");
@@ -460,11 +518,39 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity, reason, sour
 
   const meta = document.createElement("span");
   meta.className = "chosen-meta";
-  const packLabel = cartQuantity === 1 ? "1 pack" : `${cartQuantity} packs`;
+  const packLabel = pick.quantity === 1 ? "1 pack" : `${pick.quantity} packs`;
   meta.textContent = [productPackSize(product), productPrice(product), packLabel]
     .filter(Boolean)
     .join(" · ");
   meta.dataset.baseText = meta.textContent;
+
+  choiceEl.appendChild(link);
+  choiceEl.appendChild(meta);
+
+  if (pick.reason && !pick.is_substitute) {
+    const explanation = document.createElement("span");
+    explanation.className = "chosen-meta";
+    explanation.textContent = `${pick.decided_by === "agent" ? "AI selected: " : "Match: "}${pick.reason}`;
+    choiceEl.appendChild(explanation);
+  }
+
+  if (pick.is_substitute) {
+    if (pick.reason) {
+      const reason = document.createElement("span");
+      reason.className = "chosen-meta";
+      reason.textContent = pick.reason;
+      choiceEl.appendChild(reason);
+    }
+
+    const optIn = document.createElement("label");
+    optIn.className = "substitute-opt-in";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.addEventListener("change", () => onIncludeChange(checkbox.checked));
+    optIn.appendChild(checkbox);
+    optIn.appendChild(document.createTextNode(" Add this substitute to the cart"));
+    choiceEl.appendChild(optIn);
+  }
 
   const searchLink = document.createElement("a");
   searchLink.className = "chosen-meta";
@@ -472,13 +558,6 @@ function showSelectedProduct(choiceEl, item, product, cartQuantity, reason, sour
   searchLink.target = "_blank";
   searchLink.rel = "noreferrer";
   searchLink.textContent = "See all search results";
-
-  choiceEl.appendChild(link);
-  const explanation = document.createElement("span");
-  explanation.className = "chosen-meta";
-  explanation.textContent = `${source === "ai" ? "AI selected: " : "Match: "}${reason || "Deterministic match selected."}`;
-  choiceEl.appendChild(explanation);
-  choiceEl.appendChild(meta);
   choiceEl.appendChild(searchLink);
   choiceEl.closest(".item").dataset.productId = String(product.id);
 }
@@ -504,54 +583,122 @@ async function renderResult(data) {
   const rows = items.map((item) => ({ item, choice: createIngredientRow(item) }));
   let completed = 0;
 
-  const matches = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
+  // Search + rank happens here, in the browser, with the same scoring
+  // FairPrice results always used (word matching, derivative penalties,
+  // pack-size fit) — the agent doesn't reimplement any of that. It only
+  // sees the ranked outcome and makes the final call from there.
+  const searched = await mapWithConcurrency(rows, 3, async ({ item, choice }) => {
     try {
-      const products = await searchFairPrice(fairPriceSearchQuery(item.name));
-      const aiChoice = await findProductWithAlternatives(item, products, item.sources?.[0] || "Recipe");
-      const product = aiChoice.product;
-      const quantity = product ? recommendedPackCount(item, product) : 0;
-      showSelectedProduct(choice, item, product, quantity, aiChoice.reason, aiChoice.source);
-      const reason = aiChoice.reason;
-      if (!product) {
+      const { ranked, isSubstitute } = await rankWithFallback(item);
+      if (ranked.length === 0) {
         choice.className = "flag";
-        choice.textContent = `❌ ${reason}`;
-        return { unavailable: true, item, reason, row: choice.closest(".item") };
+        choice.textContent = "No FairPrice match found";
+      } else {
+        choice.textContent = "Asking the agent for the best match…";
       }
-      return { item, product, quantity, row: choice.closest(".item"), alternative: aiChoice.status === "alternative_matched", alternativeSearchTerm: aiChoice.alternativeSearchTerm };
+      return {
+        item,
+        choice,
+        isSubstitute,
+        candidates: ranked.map(({ product, score }) => ({
+          product,
+          score,
+          recommended_quantity: recommendedPackCount(item, product),
+        })),
+      };
     } catch (error) {
       choice.className = "flag";
       choice.textContent = `FairPrice search failed: ${error.message}`;
-      return null;
+      return { item, choice, isSubstitute: false, candidates: [] };
     } finally {
       completed += 1;
-      setStatus(`Matched ${completed} of ${items.length} ingredients…`);
+      setStatus(`Searched ${completed} of ${items.length} ingredients…`);
     }
   });
 
-  const unavailable = matches.filter((match) => match?.unavailable);
-  selectedMatches = matches.filter((match) => match?.product);
-  selectedMatches.forEach((match, index) => {
-    match.row.dataset.queueIndex = String(index + 1);
-  });
-  const missing = items.length - selectedMatches.length;
-  matchCountEl.textContent = `${selectedMatches.length}/${items.length}`;
-  addAllButton.disabled = selectedMatches.length === 0;
-  addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
-  if (unavailable.length) {
-    const summary = unavailable.map(({ item, reason }) => `• ${item.name} — ${reason}`).join("\n");
-    const continueAnyway = window.confirm(`⚠️ ${unavailable.length} ingredient${unavailable.length === 1 ? " is" : "s are"} unavailable:\n\n${summary}\n\nContinue with ${selectedMatches.length} available ingredient${selectedMatches.length === 1 ? "" : "s"}?`);
-    if (!continueAnyway) {
-      selectedMatches = [];
-      addAllButton.disabled = true;
-      setStatus("Cancelled. No ingredients were added to the cart.");
+  addAllButton.textContent = "Asking the agent to pick products…";
+
+  const withCandidates = searched.filter(({ candidates }) => candidates.length > 0);
+  let picks = searched
+    .filter(({ candidates }) => candidates.length === 0)
+    .map(({ item }) => ({
+      name: item.name, product: null, quantity: 0,
+      reason: "no FairPrice matches found, even after broadening the search",
+      decided_by: "search", is_substitute: false,
+    }));
+
+  if (withCandidates.length > 0) {
+    try {
+      const response = await fetch(PICK_PRODUCTS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: withCandidates.map(({ item, isSubstitute, candidates }) => ({
+            name: item.name,
+            quantity: item.quantity,
+            unit: item.unit,
+            needs_manual_reconciliation: item.needs_manual_reconciliation,
+            is_substitute: isSubstitute,
+            candidates,
+          })),
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `backend returned ${response.status}`);
+      }
+      const { picks: agentPicks } = await response.json();
+      picks = picks.concat(agentPicks);
+    } catch (error) {
+      for (const { choice } of withCandidates) {
+        choice.className = "flag";
+        choice.textContent = `Could not reach the picking agent: ${error.message}`;
+      }
+      setStatus(`Could not reach the picking agent: ${error.message}`);
       return;
     }
-    setStatus(`Continuing with ${selectedMatches.length} available ingredients; ${unavailable.length} skipped.`);
-  } else setStatus(
-    missing
-      ? `Found ${selectedMatches.length} matches; ${missing} ingredient${missing === 1 ? "" : "s"} need review.`
-      : `Found FairPrice matches for all ${selectedMatches.length} ingredients.`,
-  );
+  }
+
+  const rowByName = new Map(searched.map(({ item, choice }) => [item.name, choice]));
+
+  // A normal match is included automatically; a substitute (the exact
+  // ingredient was out of stock, so the agent suggested something else)
+  // needs an explicit checkbox before it counts — see showSelectedProduct.
+  const includedByName = new Map();
+
+  function recomputeSelection() {
+    selectedMatches = picks
+      .filter((pick) => pick.product && (!pick.is_substitute || includedByName.get(pick.name)))
+      .map((pick) => ({
+        product: pick.product,
+        quantity: pick.quantity,
+        row: rowByName.get(pick.name)?.closest(".item"),
+      }));
+    selectedMatches.forEach((match, index) => {
+      if (match.row) match.row.dataset.queueIndex = String(index + 1);
+    });
+
+    const missing = items.length - selectedMatches.length;
+    matchCountEl.textContent = `${selectedMatches.length}/${items.length}`;
+    addAllButton.disabled = selectedMatches.length === 0;
+    addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
+    setStatus(
+      missing
+        ? `${selectedMatches.length} ready to add; ${missing} ingredient${missing === 1 ? "" : "s"} need review.`
+        : `Found FairPrice matches for all ${selectedMatches.length} ingredients.`,
+    );
+  }
+
+  for (const pick of picks) {
+    const choice = rowByName.get(pick.name);
+    if (!choice) continue;
+    showSelectedProduct(choice, { name: pick.name }, pick, (checked) => {
+      includedByName.set(pick.name, checked);
+      recomputeSelection();
+    });
+  }
+
+  recomputeSelection();
 }
 
 addAllButton.addEventListener("click", async () => {
