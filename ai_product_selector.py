@@ -14,25 +14,32 @@ def select_product(payload, products, fallback_selector, model_call=None):
     Keeping it injectable makes this component deterministic in tests.
     """
     if not products:
-        return _fallback(products, fallback_selector)
+        return {"product": None, "status": "not_found", "reason": "Not found on FairPrice", "confidence": 0.0, "source": "search"}
+    available = [p for p in products if p.get("has_stock") is not False]
+    if not available:
+        return {"product": None, "status": "out_of_stock", "reason": "Out of stock", "confidence": 0.0, "source": "search"}
     model_call = model_call or _bedrock_call
-    allowed = {str(product.get("id")): product for product in products if product.get("id") is not None}
+    allowed = {str(product.get("id")): product for product in available if product.get("id") is not None}
     try:
-        answer = model_call(_prompt(payload, products))
+        answer = model_call(_prompt(payload, available))
         if isinstance(answer, str):
             answer = json.loads(answer)
+        status = answer.get("status", "matched")
+        if status == "no_suitable_match":
+            return {"product": None, "status": "no_suitable_match", "reason": str(answer.get("reason", "No suitable match found")), "confidence": 0.0, "source": "ai"}
         selected_id = str(answer["selected_product_id"])
         confidence = float(answer.get("confidence", 0.0))
         if selected_id not in allowed or not 0.5 <= confidence <= 1:
             raise ValueError("AI returned an invalid product selection")
-        return {"product": allowed[selected_id], "reason": str(answer.get("reason", "AI selected the best recipe match.")), "confidence": confidence, "source": "ai"}
+        return {"product": allowed[selected_id], "status": "matched", "reason": str(answer.get("reason", "AI selected the best recipe match.")), "confidence": confidence, "source": "ai"}
     except Exception:
-        return _fallback(products, fallback_selector)
+        product = fallback_selector(available)
+        return {**_fallback(available, fallback_selector), "product": product, "status": "matched"}
 
 
 def _prompt(payload, products):
     candidates = [{"product_id": p.get("id"), "name": p.get("name"), "description": p.get("description") or p.get("metaData", {}).get("SAP Product Name"), "price": p.get("final_price") or p.get("mrp"), "size": p.get("metaData", {}).get("DisplayUnit")} for p in products]
-    return "Choose the best grocery product for this recipe ingredient. Return JSON only with selected_product_id, reason, confidence (0 to 1). Never invent an ID; choose exactly one supplied ID. Reject clearly wrong types.\n" + json.dumps({"recipe_name": payload.get("recipe_name"), "ingredient": payload.get("ingredient"), "products": candidates}, ensure_ascii=False)
+    return "Choose the best grocery product for this recipe ingredient. Return JSON only: status='matched' or 'no_suitable_match', selected_product_id (null for no_suitable_match), reason, confidence (0 to 1). Choose only an available supplied product ID; never invent products or IDs.\n" + json.dumps({"recipe_name": payload.get("recipe_name"), "ingredient": payload.get("ingredient"), "products": candidates}, ensure_ascii=False)
 
 
 def _bedrock_call(prompt):

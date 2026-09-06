@@ -49,6 +49,35 @@ def test_invalid_id_uses_fallback():
     assert result["product"]["id"] == "light"
 
 
+def test_empty_search_is_not_found():
+    result = select_product({}, [], fallback)
+    assert result["status"] == "not_found"
+    assert result["product"] is None
+
+
+def test_all_candidates_out_of_stock():
+    products = [{"id": "a", "name": "Butter", "has_stock": False}]
+    result = select_product({}, products, fallback)
+    assert result["status"] == "out_of_stock"
+    assert result["product"] is None
+
+
+def test_ai_can_report_no_suitable_match():
+    result = select_product({}, PRODUCTS, fallback, lambda _: {
+        "status": "no_suitable_match", "selected_product_id": None,
+        "reason": "Only dark soy sauce was available",
+    })
+    assert result["status"] == "no_suitable_match"
+    assert result["product"] is None
+
+
+def test_ai_failure_falls_back_to_available_product():
+    products = [{"id": "sold", "name": "Butter", "has_stock": False}, {"id": "ok", "name": "Butter"}]
+    result = select_product({}, products, fallback, lambda _: (_ for _ in ()).throw(RuntimeError()))
+    assert result["product"]["id"] == "ok"
+    assert result["status"] == "matched"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

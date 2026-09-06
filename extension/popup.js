@@ -334,7 +334,8 @@ function chooseBestProduct(item, products) {
 
 async function chooseBestProductWithAI(item, products, recipeName) {
   const fallback = chooseBestProduct(item, products);
-  if (!fallback) return { product: null, reason: "No suitable FairPrice product found.", source: "fallback" };
+  if (!products.length) return { product: null, status: "not_found", reason: "Not found on FairPrice", source: "search" };
+  if (!fallback) return { product: null, status: "out_of_stock", reason: "Out of stock", source: "search" };
   try {
     const response = await fetch(BACKEND_URL.replace(/\/shopping-list$/, "/select-product"), {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -343,9 +344,10 @@ async function chooseBestProductWithAI(item, products, recipeName) {
     if (!response.ok) throw new Error(`AI selector returned ${response.status}`);
     const choice = await response.json();
     const product = products.find((candidate) => String(candidate.id) === String(choice.selected_product_id));
-    return { product: product || fallback, reason: product ? choice.reason : "AI selection was invalid; deterministic match used.", source: product ? choice.source : "fallback" };
+    if (choice.status === "no_suitable_match") return { product: null, status: "no_suitable_match", reason: "No suitable match found", source: "ai" };
+    return { product: product || fallback, status: "matched", reason: product ? choice.reason : "AI selection was invalid; deterministic match used.", source: product ? choice.source : "fallback" };
   } catch (_error) {
-    return { product: fallback, reason: "AI unavailable; deterministic match used.", source: "fallback" };
+    return { product: fallback, status: "matched", reason: "AI unavailable; deterministic match used.", source: "fallback" };
   }
 }
 
@@ -486,7 +488,13 @@ async function renderResult(data) {
       const product = aiChoice.product;
       const quantity = product ? recommendedPackCount(item, product) : 0;
       showSelectedProduct(choice, item, product, quantity, aiChoice.reason, aiChoice.source);
-      return product ? { item, product, quantity, row: choice.closest(".item") } : null;
+      const reason = aiChoice.reason;
+      if (!product) {
+        choice.className = "flag";
+        choice.textContent = `❌ ${reason}`;
+        return { unavailable: true, item, reason, row: choice.closest(".item") };
+      }
+      return { item, product, quantity, row: choice.closest(".item") };
     } catch (error) {
       choice.className = "flag";
       choice.textContent = `FairPrice search failed: ${error.message}`;
@@ -497,7 +505,8 @@ async function renderResult(data) {
     }
   });
 
-  selectedMatches = matches.filter(Boolean);
+  const unavailable = matches.filter((match) => match?.unavailable);
+  selectedMatches = matches.filter((match) => match?.product);
   selectedMatches.forEach((match, index) => {
     match.row.dataset.queueIndex = String(index + 1);
   });
@@ -505,7 +514,17 @@ async function renderResult(data) {
   matchCountEl.textContent = `${selectedMatches.length}/${items.length}`;
   addAllButton.disabled = selectedMatches.length === 0;
   addAllButton.textContent = `Add ${selectedMatches.length} ingredients to FairPrice Cart`;
-  setStatus(
+  if (unavailable.length) {
+    const summary = unavailable.map(({ item, reason }) => `• ${item.name} — ${reason}`).join("\n");
+    const continueAnyway = window.confirm(`⚠️ ${unavailable.length} ingredient${unavailable.length === 1 ? " is" : "s are"} unavailable:\n\n${summary}\n\nContinue with ${selectedMatches.length} available ingredient${selectedMatches.length === 1 ? "" : "s"}?`);
+    if (!continueAnyway) {
+      selectedMatches = [];
+      addAllButton.disabled = true;
+      setStatus("Cancelled. No ingredients were added to the cart.");
+      return;
+    }
+    setStatus(`Continuing with ${selectedMatches.length} available ingredients; ${unavailable.length} skipped.`);
+  } else setStatus(
     missing
       ? `Found ${selectedMatches.length} matches; ${missing} ingredient${missing === 1 ? "" : "s"} need review.`
       : `Found FairPrice matches for all ${selectedMatches.length} ingredients.`,

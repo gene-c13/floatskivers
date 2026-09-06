@@ -28,13 +28,13 @@ def select_product_route():
     data = request.get_json(force=True, silent=True) or {}
     products = data.get("products", [])
     if not products:
-        return jsonify({"selected_product_id": None, "reason": "No products found.", "confidence": 0}), 200
+        return jsonify({"status": "not_found", "selected_product_id": None, "reason": "Not found on FairPrice", "confidence": 0}), 200
     # The frontend sends the existing deterministic winner as a safe fallback.
     fallback_id = str(data.get("fallback_product_id", ""))
     fallback = lambda candidates: next((p for p in candidates if str(p.get("id")) == fallback_id), candidates[0])
     result = select_product(data, products, fallback)
-    product = result["product"]
-    return jsonify({"selected_product_id": str(product["id"]), "reason": result["reason"], "confidence": result["confidence"], "source": result["source"]})
+    product = result.get("product")
+    return jsonify({"status": result["status"], "selected_product_id": str(product["id"]) if product else None, "reason": result["reason"], "confidence": result["confidence"], "source": result["source"]})
 
 
 @app.route("/health", methods=["GET"])
